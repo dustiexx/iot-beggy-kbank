@@ -21,7 +21,7 @@ import cv2
 
 from posture import Baseline, PostureClassifier, PostureConfig, compute_features
 from posture.camera import open_source
-from posture.detector import PoseDetector, draw_debug
+from posture.detector import PoseDetector, draw_debug, draw_status
 
 
 def emit(obj: dict) -> None:
@@ -105,8 +105,7 @@ def cmd_run(args, cfg: PostureConfig) -> int:
                 last_status = now
 
             if args.show or args.debug_frame:
-                label = f"{st.state} {','.join(st.raw_issues)}"
-                img = draw_debug(frame, lms, label, st.state == "bad")
+                img = draw_status(frame, lms, st, cfg.bad_after_s)
                 if args.debug_frame:
                     cv2.imwrite(args.debug_frame, img)
                 if args.show:

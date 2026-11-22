@@ -51,3 +51,53 @@ def draw_debug(frame_bgr, landmarks, status_text: str, bad: bool):
     color = (0, 0, 255) if bad else (0, 200, 0)
     cv2.putText(out, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     return out
+
+
+ISSUE_TEXT = {
+    "slouch": "Slouching - sit up straight",
+    "head_down": "Head down - look up",
+    "uneven_shoulders": "Leaning to one side",
+    "too_close": "Too close to the screen",
+}
+
+# BGR colours
+_GREEN, _ORANGE, _RED, _GREY = (60, 180, 60), (0, 140, 255), (40, 40, 220), (120, 120, 120)
+
+
+def draw_status(frame_bgr, landmarks, st, bad_after_s: float, scale: float = 1.5):
+    """Bigger preview for --show: coloured banner with GOOD / WARNING / BAD / AWAY,
+    a countdown before the alert fires, and the issues in plain words."""
+    out = draw_debug(frame_bgr, landmarks, "", False)
+    if scale != 1.0:
+        out = cv2.resize(out, None, fx=scale, fy=scale)
+    h, w = out.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    if st.state == "away":
+        title, color, lines = "AWAY", _GREY, ["No one in front of the camera"]
+    elif st.state == "bad":
+        title, color = f"BAD POSTURE  {st.bad_seconds:.0f}s", _RED
+        lines = [ISSUE_TEXT.get(i, i) for i in (st.raw_issues or st.issues)] or ["Fixing... hold it"]
+    elif st.raw_issues:
+        left = max(0.0, bad_after_s - st.bad_seconds)
+        title, color = f"WARNING  alert in {left:.0f}s", _ORANGE
+        lines = [ISSUE_TEXT.get(i, i) for i in st.raw_issues]
+    else:
+        title, color, lines = "GOOD POSTURE", _GREEN, []
+
+    banner_h = 70 + 38 * len(lines)
+    overlay = out.copy()
+    cv2.rectangle(overlay, (0, 0), (w, banner_h), color, -1)
+    out = cv2.addWeighted(overlay, 0.75, out, 0.25, 0)
+    cv2.putText(out, title, (20, 50), font, 1.4, (255, 255, 255), 3, cv2.LINE_AA)
+    for k, line in enumerate(lines):
+        cv2.putText(out, "- " + line, (30, 95 + 38 * k), font, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
+    if st.features:
+        f = st.features
+        info = (f"neck {f['neck_ratio']:.2f}  head_drop {f['head_drop']:.3f}  "
+                f"width {f['shoulder_width']:.0f}  tilt {f['shoulder_tilt_deg']:.1f}")
+        cv2.putText(out, info, (10, h - 15), font, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(out, "q = quit", (w - 110, h - 15), font, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.rectangle(out, (0, 0), (w - 1, h - 1), color, 8)
+    return out
