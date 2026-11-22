@@ -1,0 +1,5 @@
+# picamera2 comes from apt (python3-picamera2), not pip - see README
+mediapipe>=0.10.14
+opencv-python-headless
+numpy
+pytest
