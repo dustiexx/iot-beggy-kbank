@@ -1,0 +1,20 @@
+[Unit]
+Description=Beggy control board (posture, voice, head, battery, MQTT)
+After=network-online.target sound.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kbank
+Group=kbank
+SupplementaryGroups=video audio i2c gpio
+WorkingDirectory=/home/kbank/iot-beggy-kbank/raspi
+ExecStart=/home/kbank/iot-beggy-kbank/raspi/.venv/bin/python -u beggy_main.py
+Restart=on-failure
+RestartSec=5
+# ALSA/PortAudio find the USB mic without a desktop session; XDG_RUNTIME_DIR lets audio playback work too
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

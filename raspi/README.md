@@ -14,16 +14,21 @@ One process runs everything on the Pi and talks to the cloud over MQTT:
 
 MQTT topics:
 
-| topic | direction | purpose |
-|---|---|---|
-| `beggy/esp/+` | sensor board -> | temperature, humidity, light, dust (the Pi caches the latest values for voice answers) |
-| `beggy/pi/posture` | Pi -> | posture state changes (`posture_state`) + periodic `posture_status` with fps |
-| `beggy/pi/battery` | Pi -> | `battery_status` every 30 s, `battery_low` / `battery_critical` alerts |
-| `beggy/pi/voice` | Pi -> | `wake`, `transcript`, `voice_reply` (+ tools Gemini used), `voice_error` |
-| `beggy/pi/head` | Pi -> | `head_center` results, `head_pos` |
-| `beggy/pi/status` | Pi -> | online/offline (retained, last will) + heartbeat |
-| `beggy/pi/cmd` | -> Pi | `{"action": "center" / "home" / "say" / "ask", "text": ...}`; reply on `beggy/pi/cmd_result` |
-| `beggy/pi/settings` | -> Pi | runtime settings from the dashboard; reply on `beggy/pi/settings_result` |
+Publisher = sends the message, subscriber = receives it ("AWS" = IoT Rule to DynamoDB + backend).
+
+| topic | publisher | subscriber | purpose |
+|---|---|---|---|
+| `beggy/esp/env` | ESP32 | Pi, AWS | temperature, humidity, light, dust (the Pi caches the latest values for voice answers) |
+| `beggy/pi/posture` | Pi | AWS | posture state changes (`posture_state`) + periodic `posture_status` with fps |
+| `beggy/pi/battery` | Pi | AWS | `battery_status` every 30 s, `battery_low` warnings at 20 % / 10 % |
+| `beggy/pi/voice` | Pi | AWS | `wake`, `transcript`, `voice_reply` (+ tools Gemini used), `voice_error` |
+| `beggy/pi/head` | Pi | AWS | `head_center` results, `head_pos` |
+| `beggy/pi/calendar` | Pi | AWS (backend) | next 24 h of events every 5 min, for deadline notifications |
+| `beggy/pi/status` | Pi | AWS (dashboard) | online/offline (retained, last will) + heartbeat |
+| `beggy/pi/cmd` | AWS (backend / dashboard) | Pi | `{"action": "center" / "home" / "say" / "ask", "text": ...}` |
+| `beggy/pi/cmd_result` | Pi | AWS (backend / dashboard) | reply to each command |
+| `beggy/pi/settings` | AWS (backend / dashboard) | Pi | runtime settings from the dashboard |
+| `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | which settings were applied / ignored |
 
 ```bash
 cp .env.example .env          # Gemini key, broker, camera, drivers
@@ -151,3 +156,76 @@ python head_main.py home             # back to the position used for posture cal
 Output: `{"type": "head_center", "status": "centered" | "no_person" | "timeout" | "at_limit", "pan": .., "tilt": ..}`.
 
 Posture readings are only valid at the home position: call `home` before checking posture again after centering.
+
+## Run on boot (systemd)
+
+```bash
+./scripts/install_service.sh          # installs + enables: starts on every boot, restarts on crash
+sudo systemctl start|stop|restart beggy
+journalctl -u beggy -f                # live logs
+```
+
+Stop the service before running the single-part test scripts (they need the camera / mic too).
+
+## Battery warnings
+
+iPhone-style: one spoken warning + `battery_low` on `beggy/pi/battery` at 20 %, one more at 10 %, re-armed when the charger is plugged in. No automatic shutdown. Because the HAT's percentage can be off for the first charge cycles, a weakest cell at or below 3.45 V also counts as 10 %. Levels: settings `battery_low_pct`, `battery_very_low_pct`.
+
+## Posture evaluation (fps + accuracy)
+
+```bash
+python posture_main.py calibrate --source 8      # sit straight first
+python eval_posture.py --source 8 --rounds 2     # do each pose when the window tells you
+```
+
+It asks for: good, slouch, head down, too close, leaning to one side, good, leave the view (4 s to get ready, 8 s scored each). Output in `eval_out/<date>/`: `report.md` (speed, accuracy, good-vs-bad precision/recall/false alarms, per-pose recall, confusion matrix), `frames.csv`, and example images in `correct/` and `wrong/`.
+
+## Google Calendar
+
+Gemini can list, create and delete events (it asks before deleting); the next 24 h of events go out on `beggy/pi/calendar` every 5 min for the backend's deadline notifications.
+
+1. [Google Cloud console](https://console.cloud.google.com), the project of the Gemini key: enable **Google Calendar API**
+2. **OAuth consent screen**: External, add your Google account as a test user, then **Publish app** (in "Testing" the login expires every 7 days)
+3. **Credentials > Create OAuth client ID > Desktop app**, download the JSON to `raspi/secrets/google_oauth.json`
+4. On the Pi's desktop (it opens a browser): `python -m beggy.gcal login` -> `secrets/google_token.json`
+
+`secrets/` is gitignored.
+
+## Custom wake word "hey Beggy"
+
+```bash
+python wakeword_train.py synth                    # robot-voice positives + near misses ("hey baby"...)
+python wakeword_train.py record-pos --n 40        # you (and teammates) saying "hey Beggy"
+python wakeword_train.py record-neg --seconds 180 # normal talking / room noise
+python wakeword_train.py train                    # -> models/hey_beggy.joblib, held-out recall + false triggers/hour
+python wakeword_train.py live                     # try it
+```
+
+Then set the `wakeword` setting to `models/hey_beggy.joblib`. Synthetic data alone is not enough: with it, "hey baby" and "hey becky" still trigger, so real recordings are needed.
+
+## History API (backend implements, the Pi calls it)
+
+Gemini answers history questions ("how long did I slouch today?", "dust this week?") with the tools `get_posture_history` and `get_environment_history`. They call the backend, which reads DynamoDB; the Pi never holds AWS database credentials. Set `BACKEND_URL` and `BACKEND_KEY` in `.env`; until then the tools answer "history not available yet".
+
+Every request has the header `X-Api-Key: <BACKEND_KEY>`; times are ISO 8601 with offset (`+07:00`).
+
+```
+GET /history/posture?from=2026-11-25T00:00:00+07:00&to=2026-11-25T15:30:00+07:00
+200 {"good_s": 5400, "bad_s": 1260, "away_s": 900, "alerts": 4,
+     "issues_s": {"slouch": 800, "head_down": 460}}
+
+GET /history/env?metric=dust_pm25&from=...&to=...&bucket=hour      (bucket: hour | day)
+200 {"metric": "dust_pm25",
+     "points": [{"t": "2026-11-25T09:00:00+07:00", "avg": 31.2, "min": 25, "max": 48, "count": 60}]}
+```
+
+`metric` is one of `temperature_c`, `humidity_pct`, `light_lux`, `dust_pm25`. Errors: any non-200 status; the Pi tells the user the history is unavailable.
+
+Suggested DynamoDB design (time series), if the backend team wants one:
+
+| table | partition key `pk` | sort key | other attributes |
+|---|---|---|---|
+| `beggy_readings` (raw, TTL 30 days) | `"<device>#<metric>"` e.g. `esp#dust_pm25`, `pi#posture` | `ts` = `unix_ms` (number) | `value` or the whole JSON message, `expires_at` (TTL) |
+| `beggy_rollups` (kept) | `"<device>#<metric>#hour"` / `#day` | bucket start (`unix_ms`) | `avg`, `min`, `max`, `count`; posture: `good_s`, `bad_s`, `away_s`, `alerts`, `issues_s` |
+
+A query is `pk = :pk AND ts BETWEEN :from AND :to`. Posture seconds can come from the `posture_status` messages (one every `posture_status_every_s` = 5 s: count them per state x 5 s), alerts from `posture_state` messages with `state = "bad"`.

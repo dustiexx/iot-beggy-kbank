@@ -79,13 +79,12 @@ class Runtime:
     posture_status_every_s: float = 5.0
     head_auto_home_s: float = 30.0       # after centering, go back home (posture position) after this long
     voice_enabled: bool = True
-    wakeword: str = "hey_jarvis"
+    wakeword: str = "hey_jarvis"         # or models/hey_beggy.joblib once trained on real recordings
     wake_threshold: float = 0.5
     tts_voice: str = "th-TH-PremwadeeNeural"
     battery_every_s: float = 30.0
-    battery_low_cell_v: float = 3.45
-    battery_critical_cell_v: float = 3.30
-    battery_auto_shutdown: bool = False  # True: power the Pi off cleanly at critical battery
+    battery_low_pct: float = 20          # iPhone-style: warn once at 20 %...
+    battery_very_low_pct: float = 10     # ...and once more at 10 % (no automatic shutdown)
 
 
 class Settings:

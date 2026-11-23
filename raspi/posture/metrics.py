@@ -70,10 +70,37 @@ def compute_features(landmarks, width: int, height: int, min_visibility: float =
     ear_y = (l_ear[1] + r_ear[1]) / 2
     shoulder_y = (l_sh[1] + r_sh[1]) / 2
 
-    return PostureFeatures(
+    f = PostureFeatures(
         shoulder_width=shoulder_width,
         neck_ratio=(shoulder_y - ear_y) / shoulder_width,
         head_drop=(nose[1] - ear_y) / shoulder_width,
         shoulder_tilt_deg=_angle_deg(*r_sh, *l_sh),
         head_roll_deg=_angle_deg(*r_eye, *l_eye),
     )
+    if implausible_reason(f, nose[0], l_sh[0], r_sh[0], width):
+        return None
+    return f
+
+
+# Limits for "this is a real person sitting in front of the camera". MediaPipe sometimes fits a
+# skeleton onto a chair, poster or clutter when nobody is there; those fits break these.
+# Real sitting (measured on the USB webcam): width 290-620 px of 640, tilt within +-6 deg,
+# neck_ratio 0.40-0.65 even when slouching hard.
+MIN_SHOULDER_FRAC = 0.12     # shoulders narrower than 12% of the frame = too far / not a person
+MAX_SHOULDER_TILT = 35.0
+MAX_HEAD_ROLL = 45.0
+MIN_NECK_RATIO = 0.05        # ears must be above the shoulders
+
+
+def implausible_reason(f: PostureFeatures, nose_x: float, l_sh_x: float, r_sh_x: float, width: int) -> str | None:
+    if f.shoulder_width < MIN_SHOULDER_FRAC * width:
+        return "shoulders too small"
+    if abs(f.shoulder_tilt_deg) > MAX_SHOULDER_TILT:
+        return "shoulder tilt impossible"
+    if abs(f.head_roll_deg) > MAX_HEAD_ROLL:
+        return "head roll impossible"
+    if f.neck_ratio < MIN_NECK_RATIO:
+        return "ears not above shoulders"
+    if not min(l_sh_x, r_sh_x) <= nose_x <= max(l_sh_x, r_sh_x):
+        return "nose outside the shoulders"
+    return None

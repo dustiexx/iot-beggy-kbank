@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import logging
 import queue
-import subprocess
 import threading
 import time
 
@@ -175,8 +174,8 @@ class VoiceWorker(threading.Thread):
         vcfg = VoiceConfig(device=self.env.mic_device)
         wake = None
         if self.env.wake_mode == "wake":
-            from openwakeword.model import Model
-            wake = Model(wakeword_models=[self.settings.get()["wakeword"]], inference_framework="onnx")
+            from voice.wake import make_wake
+            wake = make_wake(self.settings.get()["wakeword"])   # built-in name or models/hey_beggy.joblib
         else:
             log.info("WAKE_MODE=%s: voice only through POST /ask or the 'ask' command", self.env.wake_mode)
             self.reported_dead = True   # not an error: there is just no mic loop
@@ -190,7 +189,7 @@ class VoiceWorker(threading.Thread):
                 rt = self.settings.get()
                 if not rt["voice_enabled"]:
                     continue
-                score = max(wake.predict(c).values())
+                score = wake.predict(c)
                 if score < rt["wake_threshold"]:
                     continue
                 self.bus("voice", {"type": "wake", "score": round(float(score), 3)})
@@ -219,12 +218,36 @@ class VoiceWorker(threading.Thread):
 
 
 # ---------------------------------------------------------------- battery (UPS HAT E, I2C)
+class BatteryAlerts:
+    """iPhone-style low battery warnings: once at 20 %, once more at 10 %, re-armed when charging.
+
+    Percent comes from the HAT's fuel gauge, which can be off for the first charge cycles, so a
+    low cell voltage also counts: the weakest cell at <= cell_v_10 is treated as 10 %."""
+
+    def __init__(self):
+        self.warned: set[int] = set()
+
+    def update(self, r: dict, levels=(20, 10), cell_v_10: float = 3.45) -> int | None:
+        """Returns the level (20 / 10) to warn about now, or None."""
+        if r["plugged_in"] or r["charging"]:
+            self.warned.clear()
+            return None
+        pct = r["percent"]
+        if r["min_cell_v"] <= cell_v_10:
+            pct = min(pct, min(levels))
+        due = [lv for lv in sorted(levels) if pct <= lv and lv not in self.warned]
+        if not due:
+            return None
+        self.warned.update(lv for lv in levels if lv >= due[0])   # 20 % is skipped if we're already at 10 %
+        return due[0]
+
+
 class BatteryWorker(threading.Thread):
-    def __init__(self, settings, bus):
+    def __init__(self, settings, bus, say=None):
         super().__init__(name="battery", daemon=True)
-        self.settings, self.bus = settings, bus
+        self.settings, self.bus, self.say = settings, bus, say
         self.stop_evt = threading.Event()
-        self.alerted = None
+        self.alerts = BatteryAlerts()
 
     def run(self):
         from beggy.ups import Ups
@@ -241,19 +264,34 @@ class BatteryWorker(threading.Thread):
                 log.warning("UPS read failed: %s", e)
                 self.stop_evt.wait(rt["battery_every_s"])
                 continue
-            level = "ok"
-            if not r["plugged_in"]:
-                if r["min_cell_v"] <= rt["battery_critical_cell_v"]:
-                    level = "critical"
-                elif r["min_cell_v"] <= rt["battery_low_cell_v"]:
-                    level = "low"
-            self.bus("battery", {"type": "battery_status", "level": level, **r})
-            if level != "ok" and self.alerted != level:
-                self.bus("battery", {"type": f"battery_{level}", "percent": r["percent"], "min_cell_v": r["min_cell_v"]})
-            self.alerted = level if level != "ok" else None
-            if level == "critical" and rt["battery_auto_shutdown"]:
-                log.critical("battery critical - shutting down")
-                ups.power_off()
-                subprocess.run(["sudo", "shutdown", "-h", "now"], check=False)
-                return
+            self.bus("battery", {"type": "battery_status", **r})
+            level = self.alerts.update(r, (int(rt["battery_low_pct"]), int(rt["battery_very_low_pct"])))
+            if level:
+                self.bus("battery", {"type": "battery_low", "level_pct": level, "percent": r["percent"],
+                                     "min_cell_v": r["min_cell_v"], "minutes_to_empty": r["minutes_to_empty"]})
+                if self.say:
+                    try:
+                        self.say(f"แบตเตอรี่เหลือ {r['percent']} เปอร์เซ็นต์ค่ะ ช่วยเสียบสายชาร์จให้เบกกี้ด้วยนะคะ")
+                    except Exception:
+                        log.exception("could not speak the battery warning")
             self.stop_evt.wait(rt["battery_every_s"])
+
+
+# ---------------------------------------------------------------- calendar feed for deadline notifications
+class CalendarWorker(threading.Thread):
+    """Every few minutes publish the next 24 h of events on beggy/pi/calendar, so the backend can
+    send "calendar deadline" notifications. Does nothing until Google Calendar is connected."""
+
+    def __init__(self, robot, bus, every_s: float = 300, hours: float = 24):
+        super().__init__(name="calendar", daemon=True)
+        self.robot, self.bus, self.every_s, self.hours = robot, bus, every_s, hours
+        self.stop_evt = threading.Event()
+
+    def run(self):
+        from beggy.gcal import TOKEN_FILE
+        while not self.stop_evt.is_set():
+            if TOKEN_FILE.exists():
+                res = self.robot.calendar("list", {"days_ahead": self.hours / 24})
+                if "events" in res:
+                    self.bus("calendar", {"type": "calendar_upcoming", "hours": self.hours, **res})
+            self.stop_evt.wait(self.every_s)

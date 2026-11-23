@@ -26,7 +26,11 @@ SYSTEM_PROMPT = """\
 - ถ้าผู้ใช้ขอให้หันมาหา มองมาที่ตัวเอง หรือจัดกล้องให้ตรง ให้เรียก center_on_person
 - ถ้าผู้ใช้ถามอุณหภูมิ ความชื้น แสง ฝุ่น ให้เรียก get_environment แล้วตอบด้วยตัวเลขจริง
 - ถ้าถามเรื่องท่านั่ง ให้เรียก get_posture; ถามเรื่องแบตเตอรี่ ให้เรียก get_battery
+- ถ้าถามย้อนหลัง (วันนี้ทั้งวัน เมื่อวาน สัปดาห์นี้) ให้ใช้ get_posture_history / get_environment_history
+  แล้วสรุปเป็นคำพูดง่าย ๆ เช่น "วันนี้นั่งหลังค่อมรวม 21 นาที" ไม่ต้องอ่านตัวเลขทุกตัว
 - เรื่องตารางนัด ให้ใช้เครื่องมือ calendar ถ้าเครื่องมือตอบว่ายังไม่ได้เชื่อมต่อ ให้บอกผู้ใช้ตรง ๆ
+- ก่อนลบนัด ให้ถามยืนยันชื่อและเวลานัดกับผู้ใช้ก่อนเสมอ; เวลาที่สร้างนัดให้ใช้เขตเวลา Asia/Bangkok (+07:00)
+- ถ้าผู้ใช้ไม่บอกเวลาจบ ให้นัดยาว 1 ชั่วโมง
 - ห้ามเดาค่าที่ไม่รู้
 """
 
@@ -84,8 +88,25 @@ def make_tools(robot):
         """Create a Google Calendar event. start_iso / end_iso are ISO 8601 times in Asia/Bangkok, e.g. 2026-11-24T15:00:00+07:00."""
         return robot.calendar("create", {"title": title, "start": start_iso, "end": end_iso})
 
+    def get_posture_history(period: str) -> dict:
+        """How the user sat over a past period: seconds of good / bad posture, seconds away,
+        number of bad-posture alerts and which issues. period: today, yesterday, last_24_hours,
+        this_week or last_7_days."""
+        return robot.history("posture", {"period": period})
+
+    def get_environment_history(metric: str, period: str) -> dict:
+        """Past desk environment from the database: average, max (and when), min (and when).
+        metric: temperature_c, humidity_pct, light_lux or dust_pm25.
+        period: today, yesterday, last_24_hours, this_week or last_7_days."""
+        return robot.history("env", {"metric": metric, "period": period})
+
+    def delete_calendar_event(event_id: str) -> dict:
+        """Delete a Google Calendar event by its id (get the id from list_calendar_events first).
+        Only call this after the user clearly confirmed which event to delete."""
+        return robot.calendar("delete", {"event_id": event_id})
+
     return [center_on_person, head_home, get_environment, get_posture, get_battery,
-            list_calendar_events, create_calendar_event]
+            get_posture_history, get_environment_history, list_calendar_events, create_calendar_event, delete_calendar_event]
 
 
 RETRYABLE = ("503", "504", "429", "UNAVAILABLE", "DEADLINE", "RESOURCE_EXHAUSTED", "timed out", "Timeout")

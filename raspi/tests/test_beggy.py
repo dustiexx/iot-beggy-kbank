@@ -48,3 +48,31 @@ def test_tts_falls_back_to_offline_espeak(monkeypatch, tmp_path):
     info = tts.Speaker("none", tmp_path).say("สวัสดีค่ะ", "th-TH-PremwadeeNeural")
     assert info["engine"] == "espeak-ng"
     assert info["saved"].endswith(".wav") and (tmp_path / info["saved"].split("/")[-1]).read_bytes()[:4] == b"RIFF"
+
+
+def _r(pct, plugged=False, cell=3.8):
+    return {"percent": pct, "plugged_in": plugged, "charging": plugged, "min_cell_v": cell}
+
+
+def test_battery_warns_once_at_20_and_once_at_10():
+    from beggy.workers import BatteryAlerts
+    a = BatteryAlerts()
+    seq = [a.update(_r(p)) for p in (50, 25, 20, 19, 18, 12, 10, 9, 5)]
+    assert seq == [None, None, 20, None, None, None, 10, None, None]
+
+
+def test_battery_rearms_after_charging_and_skips_20_when_already_10():
+    from beggy.workers import BatteryAlerts
+    a = BatteryAlerts()
+    assert a.update(_r(20)) == 20
+    assert a.update(_r(40, plugged=True)) is None      # plugged in -> re-armed
+    assert a.update(_r(19)) == 20                      # warns again next time
+    b = BatteryAlerts()
+    assert b.update(_r(8)) == 10                       # started already very low: one warning, not two
+    assert b.update(_r(7)) is None
+
+
+def test_battery_low_cell_voltage_counts_as_10_percent():
+    from beggy.workers import BatteryAlerts
+    a = BatteryAlerts()
+    assert a.update(_r(55, cell=3.40)) == 10           # gauge says 55 % but a cell is nearly empty

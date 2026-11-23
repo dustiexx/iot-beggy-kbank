@@ -84,3 +84,18 @@ def test_baseline_roundtrip(tmp_path):
     p = tmp_path / "cal.json"
     b.save(p)
     assert Baseline.load(p) == b
+
+
+def test_implausible_skeletons_are_rejected():
+    # what MediaPipe fitted onto an empty chair: tiny, tilted, ears below shoulders
+    assert feats(shoulder_half=0.003) is None                    # shoulders ~4 px wide
+    assert feats(shoulder_tilt=0.25) is None                     # ~46 deg shoulder line
+    assert feats(ear_y=0.60, nose_y=0.62) is None                # ears below the shoulders
+    lm = make_landmarks()
+    lm[0].x = 0.9                                                # nose outside the shoulders
+    assert compute_features(lm, W, H) is None
+
+
+def test_hard_slouch_still_counts_as_a_person():
+    f = feats(ear_y=0.42, nose_y=0.47)                           # head dropped a lot
+    assert f is not None and f.neck_ratio < 0.5

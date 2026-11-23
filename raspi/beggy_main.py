@@ -6,6 +6,7 @@ Runs everything on the Pi in one process:
   voice   - wake word -> STT (Gemini) -> thinking (Gemini + tools) -> TTS (edge-tts) -> speaker
   battery - UPS HAT (E) over I2C
   mqtt    - publishes beggy/pi/*, receives sensor board data, commands and settings
+  calendar- Google Calendar for Gemini + upcoming events on beggy/pi/calendar (for deadline notifications)
   api     - small HTTP API (default port 8080)
 
     python beggy_main.py                    # everything
@@ -32,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from beggy.mqtt import MqttLink
 from beggy.settings import ROOT, Env, Settings
 from beggy.tts import Speaker
-from beggy.workers import BatteryWorker, VisionWorker, VoiceWorker
+from beggy.workers import BatteryWorker, CalendarWorker, VisionWorker, VoiceWorker
 
 log = logging.getLogger("beggy")
 
@@ -91,8 +92,33 @@ class Robot:
             return {"error": "battery status not available"}
         return {k: b[k] for k in ("percent", "charging", "plugged_in", "minutes_to_empty", "minutes_to_full")}
 
+    def history(self, kind, args):
+        from beggy.history import History
+        if not hasattr(self, "_history"):
+            self._history = History()
+        if kind == "posture":
+            return self._history.posture(args.get("period", "today"))
+        return self._history.environment(args.get("metric", ""), args.get("period", "today"))
+
     def calendar(self, op, args):
-        return {"error": "Google Calendar is not connected yet"}
+        from beggy.gcal import Calendar, NotConnected
+        if not hasattr(self, "_cal"):
+            self._cal = Calendar()
+        try:
+            if op == "list":
+                return {"events": self._cal.list_events(float(args.get("days_ahead", 1)))}
+            if op == "create":
+                ev = self._cal.create_event(args["title"], args["start"], args["end"])
+                self.bus("calendar", {"type": "calendar_created", **ev})
+                return {"created": ev}
+            if op == "delete":
+                return self._cal.delete_event(args["event_id"])
+            return {"error": f"unknown calendar op {op}"}
+        except NotConnected as e:
+            return {"error": str(e)}
+        except Exception as e:   # bad dates from the model, network, API errors -> let Gemini explain
+            log.warning("calendar %s failed: %s", op, e)
+            return {"error": str(e)[:200]}
 
     def status(self):
         with self.lock:
@@ -201,8 +227,11 @@ def main() -> int:
     if not args.no_voice:
         robot.voice = VoiceWorker(env, settings, robot.bus, robot, Speaker(env.audio_out, ROOT / "tts_out"))
         workers.append(robot.voice)
+    workers.append(CalendarWorker(robot, robot.bus))
     if not args.no_battery and env.ups_enabled:
-        workers.append(BatteryWorker(settings, robot.bus))
+        speaker = Speaker(env.audio_out, ROOT / "tts_out")
+        workers.append(BatteryWorker(settings, robot.bus,
+                                     say=lambda text: speaker.say(text, settings.get()["tts_voice"])))
     for w in workers:
         w.start()
 

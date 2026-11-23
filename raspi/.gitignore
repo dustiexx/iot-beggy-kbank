@@ -8,3 +8,6 @@ clips/
 settings.json
 tts_out/
 certs/
+eval_out/
+secrets/
+wakeword_data/

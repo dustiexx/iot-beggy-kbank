@@ -5,6 +5,7 @@ numpy
 pytest
 
 # voice (needs: sudo apt install libportaudio2 mpg123 espeak-ng)
+joblib
 sounddevice
 scipy
 google-genai
@@ -19,3 +20,5 @@ paho-mqtt
 edge-tts
 gTTS
 smbus2
+google-api-python-client
+google-auth-oauthlib

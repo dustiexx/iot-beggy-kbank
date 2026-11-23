@@ -54,3 +54,20 @@ def test_to_wav_header():
     wav = to_wav(np.zeros(1600, dtype=np.int16), 16000)
     with wave.open(io.BytesIO(wav)) as w:
         assert (w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()) == (16000, 1, 2, 1600)
+
+
+def test_custom_wake_stream_interface(tmp_path):
+    """CustomWake must score streaming 80 ms chunks with a saved sklearn model."""
+    import joblib
+    from sklearn.dummy import DummyClassifier
+
+    from voice.wake import make_wake
+    clf = DummyClassifier(strategy="prior").fit(np.zeros((4, 16 * 96)), [0, 0, 0, 1])
+    path = tmp_path / "w.joblib"
+    joblib.dump({"model": clf, "frames": 16}, path)
+    w = make_wake(str(path))
+    scores = [w.predict(np.zeros(1280, np.int16)) for _ in range(25)]
+    assert scores[0] == 0.0                     # warming up
+    assert abs(scores[-1] - 0.25) < 1e-6        # then the model's probability
+    w.reset()
+    assert w.predict(np.zeros(1280, np.int16)) == 0.0

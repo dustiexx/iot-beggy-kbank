@@ -45,7 +45,3 @@ class Ups:
 
     def read(self) -> dict:
         return parse(self._rd(0x02, 1)[0], self._rd(0x10, 6), self._rd(0x20, 12), self._rd(0x30, 8))
-
-    def power_off(self):
-        """Ask the HAT to cut power in ~30 s (the caller must shut Linux down right after)."""
-        self.bus.write_byte_data(ADDR, 0x01, 0x55)

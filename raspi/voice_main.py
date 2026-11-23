@@ -97,8 +97,8 @@ def cmd_listen(args, cfg: VoiceConfig) -> int:
 
     wake = None
     if not args.no_wake:
-        from openwakeword.model import Model
-        wake = Model(wakeword_models=[cfg.wakeword], inference_framework="onnx")
+        from voice.wake import make_wake
+        wake = make_wake(cfg.wakeword)
 
     save_dir = Path(args.save_dir) if args.save_dir else None
     if save_dir:
@@ -113,8 +113,7 @@ def cmd_listen(args, cfg: VoiceConfig) -> int:
                 if wake:
                     c = mic.read()
                     levels.append(rms(c))
-                    scores = wake.predict(c)
-                    score = max(scores.values())
+                    score = wake.predict(c)
                     if score < cfg.wake_threshold:
                         continue
                     emit({"type": "wake", "wakeword": cfg.wakeword, "score": round(float(score), 3)})
@@ -166,7 +165,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Beggy voice: wake word -> Gemini")
     p.add_argument("command", choices=["devices", "level", "listen"])
     p.add_argument("--device", help="part of the mic name (default from config)")
-    p.add_argument("--wakeword", help="openWakeWord model name, e.g. hey_jarvis, alexa, hey_mycroft")
+    p.add_argument("--wakeword", help="openWakeWord model name (hey_jarvis, alexa...) or our models/hey_beggy.joblib")
     p.add_argument("--threshold", type=float, help="wake word score threshold (0..1)")
     p.add_argument("--no-wake", action="store_true", help="press Enter instead of saying the wake word")
     p.add_argument("--dry-run", action="store_true", help="don't call Gemini")
