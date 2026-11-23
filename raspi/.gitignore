@@ -3,3 +3,8 @@ models/
 calibration.json
 __pycache__/
 .pytest_cache/
+.env
+clips/
+settings.json
+tts_out/
+certs/

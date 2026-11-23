@@ -3,3 +3,19 @@ mediapipe>=0.10.14
 opencv-python-headless
 numpy
 pytest
+
+# voice (needs: sudo apt install libportaudio2 mpg123 espeak-ng)
+sounddevice
+scipy
+google-genai
+python-dotenv
+requests
+# openwakeword 0.6.0's tflite-runtime dependency has no Python 3.13 wheel; we use its ONNX models instead:
+#   pip install --no-deps openwakeword==0.6.0 && pip install onnxruntime scikit-learn tqdm
+onnxruntime
+scikit-learn
+tqdm
+paho-mqtt
+edge-tts
+gTTS
+smbus2
