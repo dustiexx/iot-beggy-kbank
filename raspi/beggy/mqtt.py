@@ -6,9 +6,9 @@ Topics (prefix "beggy"):
             beggy/pi/battery   UPS HAT battery readings and low/critical alerts
             beggy/pi/voice     what the user said, Beggy's reply, voice errors
             beggy/pi/head      camera centering results / head position
-            beggy/pi/cmd_result, beggy/pi/settings_result   replies to commands / settings
+            beggy/pi/calendar  upcoming events / created / deleted / errors
+            beggy/pi/settings_result   which settings were applied
   subscribe beggy/esp/+        sensor board data (temp, humidity, light, dust)
-            beggy/pi/cmd       commands from the cloud/dashboard (center, home, say, ask)
             beggy/pi/settings  runtime settings from the dashboard
 """
 from __future__ import annotations
@@ -28,7 +28,6 @@ class MqttLink:
         self.env = env
         p = env.topic_prefix
         self.t_status = f"{p}/pi/status"
-        self.t_cmd = f"{p}/pi/cmd"
         self.t_settings = f"{p}/pi/settings"
         self.t_esp = f"{p}/esp/+"
         self.handlers = {}   # topic filter -> fn(topic, payload_dict)

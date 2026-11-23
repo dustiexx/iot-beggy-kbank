@@ -17,7 +17,7 @@ API:
     GET  /status      latest posture / battery / environment / head / voice + fps
     GET  /settings    runtime settings
     POST /settings    {"posture_bad_after_s": 5, ...}
-    POST /cmd         {"action": "center" | "home" | "say", "text": "..."}
+    POST /cmd         {"action": "center" | "home" | "say", "text": "..."}   (local testing only, not on MQTT)
     POST /ask         {"text": "...", "speak": true}   type to Beggy instead of talking
 """
 from __future__ import annotations
@@ -101,8 +101,12 @@ class Robot:
         return self._history.environment(args.get("metric", ""), args.get("period", "today"))
 
     def calendar(self, op, args):
+        """Calendar actions for Gemini tools / the feed. Errors come back as
+        {"error": message, "reason": not_connected | login_expired | api_error}."""
+        from google.auth.exceptions import RefreshError
+
         from beggy.gcal import Calendar, NotConnected
-        if not hasattr(self, "_cal"):
+        if getattr(self, "_cal", None) is None:
             self._cal = Calendar()
         try:
             if op == "list":
@@ -112,13 +116,20 @@ class Robot:
                 self.bus("calendar", {"type": "calendar_created", **ev})
                 return {"created": ev}
             if op == "delete":
-                return self._cal.delete_event(args["event_id"])
-            return {"error": f"unknown calendar op {op}"}
+                ev = self._cal.delete_event(args["event_id"])
+                self.bus("calendar", {"type": "calendar_deleted", **ev})
+                return {"deleted": ev}
+            return {"error": f"unknown calendar op {op}", "reason": "api_error"}
         except NotConnected as e:
-            return {"error": str(e)}
+            self._cal = None          # pick up a fresh login next time, no restart needed
+            return {"error": str(e), "reason": e.reason}
+        except RefreshError as e:     # token died while the service was already built
+            self._cal = None
+            return {"error": "Google Calendar login expired (run: python -m beggy.gcal login)",
+                    "reason": "login_expired", "detail": str(e)[:120]}
         except Exception as e:   # bad dates from the model, network, API errors -> let Gemini explain
             log.warning("calendar %s failed: %s", op, e)
-            return {"error": str(e)[:200]}
+            return {"error": str(e)[:200], "reason": "api_error"}
 
     def status(self):
         with self.lock:
@@ -210,14 +221,10 @@ def main() -> int:
     # inbound MQTT
     mqtt.subscribe(f"{env.topic_prefix}/esp/+", lambda t, d: robot.bus("esp", {"type": "env", **d}, publish=False))
     # Sensor board data is only cached (the broker already has it).
-    # Replies go to *_result topics - never back to beggy/pi/settings or beggy/pi/cmd, or we'd
-    # receive our own reply as a new command and loop forever.
+    # The reply goes to settings_result - never back to beggy/pi/settings, or we'd receive our
+    # own reply as new settings and loop forever.
     mqtt.subscribe(mqtt.t_settings, lambda t, d: robot.bus(
         "settings_result", {"type": "settings_applied", **settings.update(d)}))
-    mqtt.subscribe(mqtt.t_cmd, lambda t, d: threading.Thread(
-        target=lambda: robot.bus("cmd_result", {"type": "cmd_result", "action": d.get("action"),
-                                                "result": robot.command(d)}),
-        daemon=True).start())
     mqtt.start()
 
     workers = []

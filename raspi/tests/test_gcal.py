@@ -16,6 +16,16 @@ class FakeEvents:
                  {"id": "b", "summary": "Holiday", "start": {"date": "2026-12-05"}, "end": {"date": "2026-12-06"}}]
         return type("R", (), {"execute": lambda self: {"items": items}})()
 
+    def get(self, calendarId, eventId):
+        self.calls.append(("get", eventId))
+        ev = {"id": eventId, "summary": "IoT meeting", "start": {"dateTime": "2026-11-24T14:00:00+07:00"},
+              "end": {"dateTime": "2026-11-24T15:00:00+07:00"}}
+        return type("R", (), {"execute": lambda self: ev})()
+
+    def delete(self, calendarId, eventId):
+        self.calls.append(("delete", eventId))
+        return type("R", (), {"execute": lambda self: ""})()
+
     def insert(self, calendarId, body):
         self.calls.append(("insert", body))
         return type("R", (), {"execute": lambda self: {"id": "new", **body}})()
@@ -53,3 +63,51 @@ def test_create_event_adds_bangkok_timezone_and_validates():
 
 def test_simplify_missing_title():
     assert simplify({"start": {}, "end": {}})["title"] == "(no title)"
+
+
+def test_calendar_worker_publishes_events_or_error():
+    from beggy.workers import CalendarWorker
+    sent = []
+
+    class Robot:
+        def __init__(self, res):
+            self.res = res
+
+        def calendar(self, op, args):
+            assert op == "list" and args == {"days_ahead": 1.0}
+            return self.res
+
+    CalendarWorker(Robot({"events": [{"id": "a"}]}), lambda t, p: sent.append((t, p))).tick()
+    CalendarWorker(Robot({"error": "expired", "reason": "login_expired"}), lambda t, p: sent.append((t, p))).tick()
+    assert sent[0] == ("calendar", {"type": "calendar_upcoming", "hours": 24, "events": [{"id": "a"}]})
+    assert sent[1] == ("calendar", {"type": "calendar_error", "reason": "login_expired", "error": "expired"})
+
+
+def test_robot_calendar_reports_reason_and_resets_after_expiry(monkeypatch):
+    import beggy.gcal as gcal
+    from beggy_main import Robot
+
+    class Expired:
+        def list_events(self, days):
+            raise gcal.NotConnected("login expired", "login_expired")
+
+    r = Robot.__new__(Robot)
+    r._cal = Expired()
+    res = r.calendar("list", {"days_ahead": 1})
+    assert res["reason"] == "login_expired"
+    assert r._cal is None           # next call builds a new Calendar -> picks up a fresh login
+
+
+def test_delete_returns_what_was_deleted_and_publishes():
+    from beggy_main import Robot
+    svc = FakeService()
+    sent = []
+    r = Robot.__new__(Robot)
+    r._cal = Calendar(svc)
+    r.bus = lambda topic, payload: sent.append((topic, payload))
+    res = r.calendar("delete", {"event_id": "e1"})
+    assert [c[0] for c in svc.ev.calls] == ["get", "delete"]          # read title first, then delete
+    assert res["deleted"]["title"] == "IoT meeting"
+    assert sent == [("calendar", {"type": "calendar_deleted", "id": "e1", "title": "IoT meeting",
+                                  "start": "2026-11-24T14:00:00+07:00", "end": "2026-11-24T15:00:00+07:00",
+                                  "all_day": False, "location": None})]

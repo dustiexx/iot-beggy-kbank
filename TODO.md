@@ -15,7 +15,8 @@
 - **แบต UPS HAT (E) ผ่าน I2C:** เตือนแบบ iPhone ที่ 20% และ 10%
 - **systemd:** เปิดเองตอนบูต, restart เองถ้าล่ม
 - **Evaluation script:** วัด fps + accuracy + confusion matrix + ภาพกรณีถูก/ผิด
-- **Tests:** 38 ข้อผ่าน
+- **Google Calendar:** ตั้ง OAuth + login แล้ว (23 พ.ย.) ทดสอบอ่าน/สร้าง/ลบนัดบนปฏิทินจริงผ่าน
+- **Tests:** 41 ข้อผ่าน
 
 ## 📡 MQTT topics (สัญญากลางของทั้งทีม)
 
@@ -28,21 +29,58 @@
 | `beggy/pi/battery` | Pi | AWS | แบตทุก 30 วิ + `battery_low` → DB + dashboard |
 | `beggy/pi/voice` | Pi | AWS | สิ่งที่ผู้ใช้พูด + คำตอบของเบกกี้ → DB + dashboard |
 | `beggy/pi/head` | Pi | AWS | ผลการหันกล้องหาคน → dashboard |
-| `beggy/pi/calendar` | Pi | AWS (backend) | นัดใน 24 ชม. ข้างหน้า ทุก 5 นาที → แจ้งเตือน calendar deadline |
+| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | ทุก 5 นาที: `calendar_upcoming` (นัดใน 24 ชม. ข้างหน้า) หรือ `calendar_error` (เช่น login หมดอายุ) + `calendar_created` / `calendar_deleted` ทันทีเมื่อเบกกี้สร้าง/ลบนัด → แจ้งเตือน calendar deadline (ดูรายละเอียดด้านล่าง) |
 | `beggy/pi/status` | Pi | AWS (dashboard) | online / offline (retained + last will) |
-| `beggy/pi/cmd` | AWS (backend / dashboard) | Pi | สั่งงานหุ่น: `center`, `home`, `say`, `ask` |
-| `beggy/pi/cmd_result` | Pi | AWS (backend / dashboard) | ผลของคำสั่งที่ส่งมาทาง `beggy/pi/cmd` |
 | `beggy/pi/settings` | AWS (backend / dashboard) | Pi | เปลี่ยน setting จากหน้า Setting ของ dashboard |
 | `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | ยืนยันว่า setting ไหนถูกใช้ / ถูกปฏิเสธ |
 
 ทุก message เป็น JSON มี `type`, `unix_ms`, `device`
+
+### รายละเอียด `beggy/pi/calendar`
+
+Pi ส่งข้อความ 4 แบบ:
+
+| `type` | ส่งเมื่อ | ข้อมูล |
+|---|---|---|
+| `calendar_upcoming` | ทุก 5 นาที | `events`: รายการนัดทั้งหมดใน 24 ชม. ข้างหน้า (ส่งทั้งรายการทุกครั้ง, ไม่มีนัด = `[]`) |
+| `calendar_created` | ทันทีที่เบกกี้สร้างนัดจากคำสั่งเสียง | `id`, `title`, `start`, `end`, `all_day`, `location` |
+| `calendar_deleted` | ทันทีที่เบกกี้ลบนัดจากคำสั่งเสียง (หลังผู้ใช้ยืนยัน) | ข้อมูลของนัดที่ถูกลบ: `id`, `title`, `start`, `end`, `all_day`, `location` |
+| `calendar_error` | ทุก 5 นาทีแทน `calendar_upcoming` ถ้าอ่านปฏิทินไม่ได้ | `reason`: `not_connected` (ยังไม่ login), `login_expired` (ครบ 7 วัน ต้อง login ใหม่), `api_error` (เน็ต/Google มีปัญหา) + `error` ข้อความ |
+
+แต่ละ event: `{"id", "title", "start", "end", "all_day", "location"}` เวลาเป็น ISO 8601 `+07:00`
+
+**ฝั่ง backend ต้องทำ:**
+- เก็บรายการล่าสุดไว้
+- แจ้งเตือนเมื่อนัดใกล้ถึง เช่นเหลือ ≤ 30 นาที
+- **จำ `id` ที่แจ้งไปแล้ว** เพราะนัดเดิมจะมาซ้ำทุก 5 นาที
+- ถ้าได้ `calendar_error` ที่ `reason = login_expired` ให้ dashboard ขึ้นเตือนให้ login ใหม่
+
+## ⚙️ Settings บน Pi (สำหรับหน้า Setting ของ dashboard)
+
+ส่ง JSON เฉพาะค่าที่จะเปลี่ยนไปที่ `beggy/pi/settings` เช่น `{"posture_bad_after_s": 5, "tts_voice": "th-TH-NiwatNeural"}` แล้ว Pi จะตอบกลับที่ `beggy/pi/settings_result` ว่าค่าไหนใช้แล้ว (`applied`) และค่าไหนถูกปฏิเสธ (`ignored`) ค่าที่ตั้งจะถูกจำไว้ แม้รีสตาร์ทก็ไม่หาย
+
+| setting | ค่าเริ่มต้น | ทำอะไร |
+|---|---|---|
+| `posture_enabled` | `true` | เปิด/ปิดการตรวจท่านั่ง |
+| `posture_bad_after_s` | `10` | ท่าไม่ดีต่อเนื่องกี่วินาทีถึงเตือน |
+| `posture_status_every_s` | `5` | ส่ง posture status ขึ้น AWS ทุกกี่วินาที |
+| `head_auto_home_s` | `30` | หลังหันหาคน กลับท่าปกติ (ตำแหน่งตรวจท่านั่ง) ภายในกี่วินาที |
+| `voice_enabled` | `true` | เปิด/ปิดระบบเสียง |
+| `wakeword` | `"hey_jarvis"` | คำปลุก (`"models/hey_beggy.joblib"` เมื่อเทรนเสร็จ) ⚠️ มีผลหลังรีสตาร์ท service |
+| `wake_threshold` | `0.5` | ความไวของคำปลุก (0–1, ต่ำ = ไวขึ้นแต่ปลุกผิดบ่อยขึ้น) |
+| `tts_voice` | `"th-TH-PremwadeeNeural"` | เสียงพูด: หญิง / `"th-TH-NiwatNeural"` ชาย |
+| `battery_every_s` | `30` | อ่านแบตทุกกี่วินาที |
+| `battery_low_pct` | `20` | เตือนแบตต่ำครั้งแรกที่กี่ % |
+| `battery_very_low_pct` | `10` | เตือนแบตต่ำครั้งที่สองที่กี่ % |
+
+ค่าฮาร์ดแวร์ เช่น broker, กล้อง, servo, ลำโพง และ backend URL อยู่ในไฟล์ `raspi/.env` บน Pi ตั้งได้จากที่ Pi เท่านั้น เปลี่ยนจาก dashboard ไม่ได้
 
 ---
 
 ## 🔴 ต้องทำ (สำคัญ: มีผลต่อคะแนน)
 
 - [ ] **AWS IoT Core (broker):** สร้าง thing + certificate + policy แล้วส่ง endpoint + cert ให้ฝั่ง Pi ใส่ `.env` (โค้ดรองรับแล้ว ตอนนี้ใช้ Mosquitto บน Pi ไปก่อน) **ใครถือบัญชี AWS?**
-- [ ] **ทีม backend: History API** ให้เบกกี้ตอบคำถามย้อนหลังได้ เช่น "วันนี้นั่งค่อมนานแค่ไหน" หรือ "ฝุ่นสัปดาห์นี้เป็นยังไง" Pi ทำฝั่งตัวเองเสร็จแล้ว รอ backend ทำ 2 endpoint ตามสเปกใน `raspi/README.md` หัวข้อ "History API" (มีแบบตาราง DynamoDB ที่แนะนำด้วย) เสร็จแล้วส่ง URL + API key ให้ฝั่ง Pi ใส่ `.env`
+- [ ] **ทีม backend: History API** ให้เบกกี้ตอบคำถามย้อนหลังได้ เช่น "วันนี้นั่งค่อมนานแค่ไหน" หรือ "ฝุ่นสัปดาห์นี้เป็นยังไง" Pi ทำฝั่งตัวเองเสร็จแล้ว รอ backend ทำ 2 endpoint ตามสเปกด้านบนของไฟล์ `raspi/beggy/history.py` เสร็จแล้วส่ง URL + API key ให้ฝั่ง Pi ใส่ `.env`
 - [ ] **ทีม ESP32:** (1) ยืนยันชื่อ topic และ field JSON ตอนนี้ Pi รออ่าน `beggy/esp/env` เป็น `{"temperature_c", "humidity_pct", "light_lux", "dust_pm25"}` ถ้าใช้ชื่ออื่นบอกฝั่ง Pi (2) publish ด้วย `retain=true` Pi จะได้ค่าล่าสุดทันทีหลังรีสตาร์ท
 - [ ] **วัดผล posture (เกณฑ์ข้อ 9, 2 คะแนน):** นั่งหน้ากล้อง calibrate แล้วรัน `eval_posture.py` ใช้เวลาประมาณ 3 นาที/รอบ ได้ตัวเลข + ภาพใส่สไลด์เลย
 - [ ] **commit + push** งานรอบล่าสุดของ Pi (ยังไม่ได้ commit)
@@ -57,7 +95,14 @@
   - ทุกคนในทีมพูด "hey Beggy" คนละ 20–40 ครั้ง: `wakeword_train.py record-pos`
   - อัดเสียงคุยปกติประมาณ 3 นาที: `wakeword_train.py record-neg`
   - (ตอนนี้ยังใช้ "hey jarvis" แทน)
-- [ ] **Google Calendar:** ตั้ง OAuth ใน Google Cloud แล้ว login บนจอ Pi ครั้งเดียว (4 ขั้น ใน README)
+
+## 🔁 ต้องทำซ้ำเป็นระยะ
+
+- [ ] **Login Google Calendar ใหม่ทุก 7 วัน** (แอปอยู่โหมด Testing, Google ตัด login อัตโนมัติ)
+  - login ล่าสุด **23 พ.ย.** → หมดอายุประมาณ **30 พ.ย.**
+  - **ต้อง login ใหม่ก่อนอัดวิดีโอ/พรีเซนต์**
+  - วิธี: บนจอ Pi รัน `cd ~/iot-beggy-kbank/raspi && .venv/bin/python -m beggy.gcal login` แล้วกด Allow ใน browser
+  - ถ้าลืม: เบกกี้จะบอกว่า login หมดอายุ และ dashboard จะได้ `calendar_error` ที่ `reason = login_expired` ส่วนอื่นของหุ่นยังทำงานปกติ
 
 ## 🎤 สไลด์ + วิดีโอ (7 คะแนน)
 

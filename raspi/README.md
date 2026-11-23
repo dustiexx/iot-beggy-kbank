@@ -7,10 +7,10 @@ One process runs everything on the Pi and talks to the cloud over MQTT:
 | part | what it does |
 |---|---|
 | vision | camera -> MediaPipe posture on the Pi (edge) + pan/tilt head centering |
-| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash) -> TTS (edge-tts, Thai) -> speaker |
+| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker |
 | battery | UPS HAT (E) over I2C: percent, charging, low/critical alerts |
-| mqtt | publishes `beggy/pi/*`, receives sensor board data `beggy/esp/+`, commands and settings |
-| api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask` |
+| mqtt | publishes `beggy/pi/*`, receives sensor board data `beggy/esp/+` and settings `beggy/pi/settings` |
+| api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask` (local testing on the Pi only; the cloud talks to the Pi through MQTT) |
 
 MQTT topics:
 
@@ -23,10 +23,8 @@ Publisher = sends the message, subscriber = receives it ("AWS" = IoT Rule to Dyn
 | `beggy/pi/battery` | Pi | AWS | `battery_status` every 30 s, `battery_low` warnings at 20 % / 10 % |
 | `beggy/pi/voice` | Pi | AWS | `wake`, `transcript`, `voice_reply` (+ tools Gemini used), `voice_error` |
 | `beggy/pi/head` | Pi | AWS | `head_center` results, `head_pos` |
-| `beggy/pi/calendar` | Pi | AWS (backend) | next 24 h of events every 5 min, for deadline notifications |
+| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | every 5 min `calendar_upcoming` (next 24 h of events) or `calendar_error` (`reason`: `not_connected` / `login_expired` / `api_error`); `calendar_created` / `calendar_deleted` right away when Gemini adds / removes an event |
 | `beggy/pi/status` | Pi | AWS (dashboard) | online/offline (retained, last will) + heartbeat |
-| `beggy/pi/cmd` | AWS (backend / dashboard) | Pi | `{"action": "center" / "home" / "say" / "ask", "text": ...}` |
-| `beggy/pi/cmd_result` | Pi | AWS (backend / dashboard) | reply to each command |
 | `beggy/pi/settings` | AWS (backend / dashboard) | Pi | runtime settings from the dashboard |
 | `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | which settings were applied / ignored |
 
@@ -185,7 +183,7 @@ It asks for: good, slouch, head down, too close, leaning to one side, good, leav
 Gemini can list, create and delete events (it asks before deleting); the next 24 h of events go out on `beggy/pi/calendar` every 5 min for the backend's deadline notifications.
 
 1. [Google Cloud console](https://console.cloud.google.com), the project of the Gemini key: enable **Google Calendar API**
-2. **OAuth consent screen**: External, add your Google account as a test user, then **Publish app** (in "Testing" the login expires every 7 days)
+2. **OAuth consent screen** (Google Auth Platform): External, add your Google account under Audience > Test users. Leave the app in **Testing**: then Google ends the login every 7 days, so run step 4 again before a demo (Beggy says the login expired when that happens)
 3. **Credentials > Create OAuth client ID > Desktop app**, download the JSON to `raspi/secrets/google_oauth.json`
 4. On the Pi's desktop (it opens a browser): `python -m beggy.gcal login` -> `secrets/google_token.json`
 
@@ -203,29 +201,6 @@ python wakeword_train.py live                     # try it
 
 Then set the `wakeword` setting to `models/hey_beggy.joblib`. Synthetic data alone is not enough: with it, "hey baby" and "hey becky" still trigger, so real recordings are needed.
 
-## History API (backend implements, the Pi calls it)
+## History API (Gemini history questions)
 
-Gemini answers history questions ("how long did I slouch today?", "dust this week?") with the tools `get_posture_history` and `get_environment_history`. They call the backend, which reads DynamoDB; the Pi never holds AWS database credentials. Set `BACKEND_URL` and `BACKEND_KEY` in `.env`; until then the tools answer "history not available yet".
-
-Every request has the header `X-Api-Key: <BACKEND_KEY>`; times are ISO 8601 with offset (`+07:00`).
-
-```
-GET /history/posture?from=2026-11-25T00:00:00+07:00&to=2026-11-25T15:30:00+07:00
-200 {"good_s": 5400, "bad_s": 1260, "away_s": 900, "alerts": 4,
-     "issues_s": {"slouch": 800, "head_down": 460}}
-
-GET /history/env?metric=dust_pm25&from=...&to=...&bucket=hour      (bucket: hour | day)
-200 {"metric": "dust_pm25",
-     "points": [{"t": "2026-11-25T09:00:00+07:00", "avg": 31.2, "min": 25, "max": 48, "count": 60}]}
-```
-
-`metric` is one of `temperature_c`, `humidity_pct`, `light_lux`, `dust_pm25`. Errors: any non-200 status; the Pi tells the user the history is unavailable.
-
-Suggested DynamoDB design (time series), if the backend team wants one:
-
-| table | partition key `pk` | sort key | other attributes |
-|---|---|---|---|
-| `beggy_readings` (raw, TTL 30 days) | `"<device>#<metric>"` e.g. `esp#dust_pm25`, `pi#posture` | `ts` = `unix_ms` (number) | `value` or the whole JSON message, `expires_at` (TTL) |
-| `beggy_rollups` (kept) | `"<device>#<metric>#hour"` / `#day` | bucket start (`unix_ms`) | `avg`, `min`, `max`, `count`; posture: `good_s`, `bad_s`, `away_s`, `alerts`, `issues_s` |
-
-A query is `pk = :pk AND ts BETWEEN :from AND :to`. Posture seconds can come from the `posture_status` messages (one every `posture_status_every_s` = 5 s: count them per state x 5 s), alerts from `posture_state` messages with `state = "bad"`.
+`beggy/history.py` asks the backend for past posture / sensor data (`BACKEND_URL`, `BACKEND_KEY` in `.env`). The API contract is at the top of that file. Until the backend is connected, Gemini answers that history isn't available yet.

@@ -1,7 +1,7 @@
 """History questions for Gemini ("how long did I slouch today?", "dust this week?") answered from
 the backend, which reads DynamoDB. The Pi never talks to DynamoDB itself.
 
-Backend API contract (the backend team implements it; see raspi/README.md "History API"):
+Backend API contract (the backend team implements it):
 
   GET {BACKEND_URL}/history/posture?from=<ISO8601>&to=<ISO8601>
       -> {"good_s": 5400, "bad_s": 1260, "away_s": 900, "alerts": 4,

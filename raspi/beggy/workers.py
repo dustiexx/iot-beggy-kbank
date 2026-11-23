@@ -279,19 +279,27 @@ class BatteryWorker(threading.Thread):
 
 # ---------------------------------------------------------------- calendar feed for deadline notifications
 class CalendarWorker(threading.Thread):
-    """Every few minutes publish the next 24 h of events on beggy/pi/calendar, so the backend can
-    send "calendar deadline" notifications. Does nothing until Google Calendar is connected."""
+    """Every few minutes publish on beggy/pi/calendar either
+      {"type": "calendar_upcoming", "hours": 24, "events": [...]}   the next 24 h, or
+      {"type": "calendar_error", "reason": "not_connected" | "login_expired" | "api_error", "error": "..."}
+    (calendar_created / calendar_deleted are sent right away by Robot.calendar when Gemini changes events)
+    so the backend can send "calendar deadline" notifications and the dashboard can tell
+    "no events" apart from "Beggy can't read the calendar"."""
 
     def __init__(self, robot, bus, every_s: float = 300, hours: float = 24):
         super().__init__(name="calendar", daemon=True)
         self.robot, self.bus, self.every_s, self.hours = robot, bus, every_s, hours
         self.stop_evt = threading.Event()
 
+    def tick(self):
+        res = self.robot.calendar("list", {"days_ahead": self.hours / 24})
+        if "events" in res:
+            self.bus("calendar", {"type": "calendar_upcoming", "hours": self.hours, **res})
+        else:
+            self.bus("calendar", {"type": "calendar_error", "reason": res.get("reason", "api_error"),
+                                  "error": res.get("error", "unknown error")})
+
     def run(self):
-        from beggy.gcal import TOKEN_FILE
         while not self.stop_evt.is_set():
-            if TOKEN_FILE.exists():
-                res = self.robot.calendar("list", {"days_ahead": self.hours / 24})
-                if "events" in res:
-                    self.bus("calendar", {"type": "calendar_upcoming", "hours": self.hours, **res})
+            self.tick()
             self.stop_evt.wait(self.every_s)

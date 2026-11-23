@@ -2,8 +2,8 @@
 
 One-time setup (see README "Google Calendar"):
   1. Google Cloud console, same project as the Gemini key: enable "Google Calendar API"
-  2. OAuth consent screen: External, add your Google account as a test user
-     (then "Publish app" -> In production, otherwise the login expires every 7 days)
+  2. OAuth consent screen: External, add your Google account as a test user. We stay in "Testing"
+     (production needs a homepage + privacy policy), so the login has to be redone every 7 days.
   3. Credentials -> Create OAuth client ID -> Desktop app -> download JSON as raspi/secrets/google_oauth.json
   4. On the Pi desktop: python -m beggy.gcal login   (opens a browser, you allow access once)
      -> raspi/secrets/google_token.json (gitignored), refreshed automatically after that
@@ -28,21 +28,29 @@ TZ = ZoneInfo("Asia/Bangkok")
 
 
 class NotConnected(Exception):
-    pass
+    def __init__(self, msg: str, reason: str = "not_connected"):
+        super().__init__(msg)
+        self.reason = reason     # not_connected | login_expired
 
 
 def _credentials():
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     if not TOKEN_FILE.exists():
-        raise NotConnected("Google Calendar is not connected yet (run: python -m beggy.gcal login)")
+        raise NotConnected("Google Calendar is not connected yet (run: python -m beggy.gcal login)", "not_connected")
     creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    expired_msg = ("Google Calendar login expired - the app is in Testing mode, so Google ends the login "
+                   "every 7 days (run: python -m beggy.gcal login)")
     if not creds.valid:
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            from google.auth.exceptions import RefreshError
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:   # "invalid_grant": refresh token revoked / 7-day testing limit
+                raise NotConnected(expired_msg, "login_expired") from e
             TOKEN_FILE.write_text(creds.to_json())
         else:
-            raise NotConnected("Google Calendar login expired (run: python -m beggy.gcal login)")
+            raise NotConnected(expired_msg, "login_expired")
     return creds
 
 
@@ -92,8 +100,10 @@ class Calendar:
         return simplify(self.service.events().insert(calendarId=self.calendar_id, body=body).execute())
 
     def delete_event(self, event_id: str) -> dict:
+        """Deletes the event and returns what it was (title / time), for the dashboard and Gemini."""
+        ev = simplify(self.service.events().get(calendarId=self.calendar_id, eventId=event_id).execute())
         self.service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
-        return {"deleted": event_id}
+        return ev
 
 
 def login():
