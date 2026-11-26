@@ -42,6 +42,7 @@ class Env:
     head_driver: str            # hwpwm | gpio | pca9685 | fake | sim
     mic_device: str
     audio_gain_db: float        # louder TTS playback (soft-limited), e.g. 8
+    whisper_model: str          # offline STT backup (faster-whisper): base | off | path to a CT2 model
     audio_out: str              # none = save replies to tts_out/ instead of playing | default | ALSA device e.g. hw:3,0
     wake_mode: str              # wake | off
     ups_enabled: bool
@@ -70,6 +71,7 @@ class Env:
             mic_device=_env("MIC_DEVICE", "DGM20"),
             audio_out=_env("AUDIO_OUT", "none"),
             audio_gain_db=_env("AUDIO_GAIN_DB", 0.0, float),
+            whisper_model=_env("WHISPER_MODEL", "base"),
             wake_mode=_env("WAKE_MODE", "wake"),
             ups_enabled=_env("UPS_ENABLED", True, bool),
             api_port=_env("API_PORT", 8080, int),

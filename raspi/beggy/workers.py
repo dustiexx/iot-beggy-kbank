@@ -152,7 +152,8 @@ class VoiceWorker(threading.Thread):
     def _ensure_ai(self):
         if self.assistant is None:
             from beggy.assistant import Assistant, Stt
-            self.stt, self.assistant = Stt(), Assistant(self.robot)
+            from beggy.local_stt import make_local_stt
+            self.stt, self.assistant = Stt(make_local_stt(self.env.whisper_model)), Assistant(self.robot)
 
     def handle_audio(self, wav: bytes, source: str = "voice", speak: bool = True) -> dict:
         """Recorded speech (16 kHz wav) -> STT -> handle_text. Used by the mic loop and POST /ask_audio."""

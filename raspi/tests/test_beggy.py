@@ -100,7 +100,7 @@ class _FakeModels:
 
 def _stt(errors, models=("lite-a", "lite-b", "lite-c")):
     stt = _assistant.Stt.__new__(_assistant.Stt)
-    stt.models, stt.last_model = list(models), None
+    stt.models, stt.last_model, stt.local = list(models), None, None
     stt.client = _types.SimpleNamespace(models=_FakeModels(errors))
     return stt
 
@@ -197,3 +197,34 @@ def test_edge_tts_is_paused_after_a_failure(monkeypatch, tmp_path):
     sp.edge_skip_until = 0                       # pause over -> tried again
     sp.synth("ค", "v")
     assert len(calls) == 2
+
+
+class _FakeLocal:
+    name = "whisper-base"
+
+    def __init__(self):
+        self.calls = 0
+
+    def transcribe(self, wav):
+        self.calls += 1
+        return "ฟุ่นเยอะไหม"
+
+
+def test_stt_uses_offline_whisper_when_every_gemini_model_is_busy():
+    stt = _stt([RuntimeError("503 UNAVAILABLE")] * 3)
+    stt.local = _FakeLocal()
+    assert stt.transcribe(b"wav") == "ฟุ่นเยอะไหม"
+    assert len(stt.client.models.used) == 3 and stt.last_model == "whisper-base"
+
+
+def test_stt_goes_offline_right_away_without_internet():
+    stt = _stt([ConnectionError("[Errno -3] Temporary failure in name resolution")])
+    stt.local = _FakeLocal()
+    assert stt.transcribe(b"wav") == "ฟุ่นเยอะไหม"
+    assert stt.client.models.used == ["lite-a"]           # no point trying the other Gemini models
+
+
+def test_local_whisper_can_be_turned_off():
+    from beggy.local_stt import make_local_stt
+    assert make_local_stt("off") is None and make_local_stt("") is None
+    assert make_local_stt("base").name == "whisper-base"

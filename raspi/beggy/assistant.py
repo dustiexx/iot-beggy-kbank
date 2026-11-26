@@ -58,13 +58,15 @@ def _client():
 
 
 class Stt:
-    def __init__(self):
+    def __init__(self, local=None):
         self.client = _client()
         self.models = _models("GEMINI_STT_MODEL", STT_MODELS)
+        self.local = local              # LocalWhisper: offline backup when every Gemini model fails
         self.last_model = None
 
     def transcribe(self, wav: bytes, timeout_s: float = 15) -> str:
-        """Tries each model in turn when one is overloaded (503), slow or out of quota (free tier)."""
+        """Tries each Gemini model in turn when one is overloaded (503), slow or out of quota (free tier),
+        then the offline Whisper backup. Any other Gemini error (no internet, bad key) goes straight to it."""
         from google.genai import types
         errors = []
         for model in self.models:
@@ -78,10 +80,19 @@ class Stt:
                 self.last_model = model
                 return (r.text or "").strip()
             except Exception as e:
-                if not any(k in str(e) for k in RETRYABLE):
-                    raise
-                log.warning("STT %s unavailable (%s), trying next model", model, str(e)[:80])
                 errors.append(f"{model}: {str(e)[:80]}")
+                if any(k in str(e) for k in RETRYABLE):
+                    log.warning("STT %s unavailable (%s), trying next model", model, str(e)[:80])
+                    continue
+                if self.local is None:
+                    raise
+                log.warning("STT %s failed (%s)", model, str(e)[:80])
+                break                   # the other Gemini models would fail the same way
+        if self.local is not None:
+            log.warning("Gemini STT unavailable - using offline %s", self.local.name)
+            text = self.local.transcribe(wav)
+            self.last_model = self.local.name
+            return text
         raise RuntimeError("all Gemini STT models unavailable (503 UNAVAILABLE): " + " | ".join(errors))
 
 

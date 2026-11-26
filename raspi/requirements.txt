@@ -22,3 +22,4 @@ gTTS
 smbus2
 google-api-python-client
 google-auth-oauthlib
+faster-whisper   # offline STT backup (WHISPER_MODEL)

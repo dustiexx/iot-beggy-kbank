@@ -7,7 +7,7 @@ One process runs everything on the Pi and talks to the cloud over MQTT:
 | part | what it does |
 |---|---|
 | vision | camera -> MediaPipe posture on the Pi (edge) + pan/tilt head centering |
-| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker. If a model answers 503 "high demand" (common on the free tier), the next lite model takes over: 3.1 → 3.5 → 2.5 flash-lite (`GEMINI_MODEL` / `GEMINI_STT_MODEL`, comma lists). If they all fail, Beggy says so out loud. edge-tts often refuses for a while: after one failure it is skipped for 10 min (gTTS instead) |
+| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker. If a model answers 503 "high demand" (common on the free tier), the next lite model takes over: 3.1 → 3.5 → 2.5 flash-lite (`GEMINI_MODEL` / `GEMINI_STT_MODEL`, comma lists). If they all fail (or there is no internet), STT falls back to offline Whisper on the Pi (`WHISPER_MODEL=base`, faster-whisper, ~2.4 s, small tone slips like "ฟุ่น" for "ฝุ่น"); if the answer step fails too, Beggy says so out loud. edge-tts often refuses for a while: after one failure it is skipped for 10 min (gTTS instead) |
 | battery | UPS HAT (E) over I2C: percent, charging, low/critical alerts |
 | mqtt | publishes `beggy/pi/*`, receives sensor board data `beggy/esp/+` and settings `beggy/pi/settings` |
 | api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask`, `POST /ask_audio` (local testing on the Pi only; the cloud talks to the Pi through MQTT) |
