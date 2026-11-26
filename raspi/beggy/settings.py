@@ -85,8 +85,8 @@ class Runtime:
     posture_status_every_s: float = 5.0
     head_auto_home_s: float = 30.0       # after centering, go back home (posture position) after this long
     voice_enabled: bool = True
-    wakeword: str = "hey_jarvis"         # or models/hey_beggy.joblib once trained on real recordings
-    wake_threshold: float = 0.5
+    wakeword: str = "models/hey_beggy.joblib"   # our "hey Beggy" model (v5); fallback: "hey_jarvis" with 0.4
+    wake_threshold: float = 0.98                # hey_beggy: 0.98 (lower = more false wakes); restart to change wakeword
     tts_voice: str = "th-TH-PremwadeeNeural"
     battery_every_s: float = 30.0
     battery_low_pct: float = 20          # iPhone-style: warn once at 20 %...

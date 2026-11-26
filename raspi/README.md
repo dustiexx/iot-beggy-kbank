@@ -106,7 +106,7 @@ python -m pytest tests
 
 Flow: openWakeWord listens offline for the wake word -> records until you stop talking -> sends the clip to Gemini, which returns the Thai transcript and Beggy's short Thai reply in one call.
 
-The service uses the custom "hey Beggy" model (`settings.json`: `"wakeword": "models/hey_beggy.joblib"`, `"wake_threshold": 0.98`; changing the wake word needs a service restart, the threshold does not). `hey_jarvis` (ready-made, threshold 0.4) is the fallback.
+The service uses the custom "hey Beggy" model by default (`models/hey_beggy.joblib`, in git, threshold 0.98; defaults in `beggy/settings.py`, override in `settings.json` / the dashboard; changing the wake word needs a service restart, the threshold does not). `hey_jarvis` (ready-made, threshold 0.4) is the fallback.
 
 ### Setup
 

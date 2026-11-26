@@ -1,5 +1,6 @@
 .venv/
-models/
+models/*
+!models/hey_beggy.joblib
 calibration.json
 __pycache__/
 .pytest_cache/
