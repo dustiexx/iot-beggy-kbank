@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+# never commit credentials
+certs/
+include/secrets.h
