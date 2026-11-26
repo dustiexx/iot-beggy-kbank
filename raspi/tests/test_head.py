@@ -81,3 +81,83 @@ def test_sim_view_moves_opposite_to_head():
     centre = head.view(frame).mean()
     head.move_to(cfg.home_pan - 15, cfg.home_tilt)  # turn right
     assert head.view(frame).mean() > centre        # sees more of the right side
+
+
+# --- hardware PWM driver against a fake /sys/class/pwm ---
+from head.servo import HwPwmHead
+
+
+@pytest.fixture
+def hwpwm(tmp_path, monkeypatch):
+    dev = tmp_path / "devices" / "1f00098000.pwm"
+    dev.mkdir(parents=True)
+    chip = tmp_path / "pwm" / "pwmchip0"
+    chip.mkdir(parents=True)
+    (chip / "device").symlink_to(dev)
+    for ch in range(4):                       # pretend every channel is already exported
+        d = chip / f"pwm{ch}"
+        d.mkdir()
+        for f in ("period", "duty_cycle", "enable"):
+            (d / f).write_text("0")
+    spins = []
+    monkeypatch.setattr("head.servo.subprocess.run", lambda *a, **k: None)     # no real pinctrl
+    monkeypatch.setattr("head.servo.time.sleep", lambda s: spins.append(s))
+
+    def make(**kw):
+        cfg = HeadConfig(driver="hwpwm", pan_state_path=str(tmp_path / "state.json"), **kw)
+        return HwPwmHead(cfg, sysfs=str(tmp_path / "pwm")), chip, spins
+    return make
+
+
+def read(chip, ch, f):
+    return int((chip / f"pwm{ch}" / f).read_text())
+
+
+def test_hwpwm_positional_tilt_pulse_and_release(hwpwm):
+    head, chip, _ = hwpwm(pan_continuous=False)
+    head.move_one("tilt", 90)
+    assert read(chip, 1, "period") == 20_000_000
+    assert read(chip, 1, "duty_cycle") == 1_450_000         # 0.5 + 1.9 * 90/180 ms
+    assert read(chip, 1, "enable") == 1
+    assert read(chip, 0, "enable") == 0                     # pan untouched
+    head.close()
+    assert read(chip, 1, "enable") == 0
+
+
+def test_hwpwm_slews_in_small_steps(hwpwm):
+    head, chip, sleeps = hwpwm(pan_continuous=False, slew_deg_s=100)
+    head.move_one("tilt", 90)
+    sleeps.clear()
+    head.move_one("tilt", 100)
+    assert len(sleeps) == 10 and all(abs(s - 0.01) < 1e-9 for s in sleeps)
+
+
+def test_hwpwm_continuous_pan_spins_for_delta_over_speed(hwpwm):
+    head, chip, sleeps = hwpwm(pan_deg_s_pos=50.0, pan_deg_s_neg=40.0)
+    assert head.pan == 90.0                                 # no state file yet -> home
+    head.move_one("pan", 110)
+    assert sleeps == [pytest.approx(20 / 50)]
+    assert read(chip, 0, "duty_cycle") == 1_550_000         # stop 1.45 + spin 0.10
+    assert read(chip, 0, "enable") == 0                     # stopped after the spin
+    sleeps.clear()
+    head.move_one("pan", 90)
+    assert sleeps == [pytest.approx(20 / 40)]
+    assert read(chip, 0, "duty_cycle") == 1_350_000
+
+
+def test_hwpwm_continuous_pan_estimate_persists_and_clamps(hwpwm):
+    head, _, sleeps = hwpwm(pan_max=120.0)
+    assert head.move_one("pan", 170) == 120.0               # limits apply to the estimate
+    head2, _, _ = hwpwm(pan_max=120.0)
+    assert head2.pan == 120.0                               # read back from the state file
+    sleeps.clear()
+    head2.move_one("pan", 121)                              # clamped -> no move at all
+    assert sleeps == []
+    head2.set_pan_estimate(90.0)
+    assert hwpwm()[0].pan == 90.0
+
+
+def test_hwpwm_tiny_pan_moves_are_skipped(hwpwm):
+    head, _, sleeps = hwpwm()
+    head.move_to(91.0, 90.0)
+    assert not any(s > 0.02 for s in sleeps)                # no pan spin for 1 deg

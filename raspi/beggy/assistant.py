@@ -11,11 +11,24 @@ import time
 
 log = logging.getLogger("assistant")
 
-STT_MODEL = "gemini-3.1-flash-lite"
-# Tried in order. Free tier (Nov 2026): flash-lite 15 RPM / 500 RPD and ~2-5 s per answer;
-# 3.6 / 3.8 flash only 5 RPM / 20 RPD and 13-55 s or 503/504 - so lite only. Add a fallback
-# with GEMINI_MODEL=gemini-3.1-flash-lite,gemini-3.6-flash if you accept spending its 20/day.
-CHAT_MODELS = ["gemini-3.1-flash-lite"]
+# Tried in order, lite models only. Free tier (Nov 2026): 3.1 flash-lite 15 RPM / 500 RPD, ~2-5 s per answer,
+# but it sometimes answers 503 "high demand" for a while: then the next lite model takes over.
+# 3.6 / 3.8 flash are only 5 RPM / 20 RPD and slow - add them yourself (GEMINI_MODEL=...) if you accept that.
+LITE_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
+STT_MODELS = LITE_MODELS     # override with GEMINI_STT_MODEL (comma list)
+CHAT_MODELS = LITE_MODELS    # override with GEMINI_MODEL (comma list)
+
+
+def _models(env_name: str, default: list[str]) -> list[str]:
+    return [m.strip() for m in os.environ.get(env_name, ",".join(default)).split(",") if m.strip()]
+
+
+def _thinking(model: str):
+    """Least thinking = fastest answers. Gemini 2.x uses a token budget, 3.x a level."""
+    from google.genai import types
+    if model.startswith("gemini-2"):
+        return types.ThinkingConfig(thinking_budget=0)
+    return types.ThinkingConfig(thinking_level="minimal")
 
 STT_PROMPT = ("Transcribe this audio exactly as spoken. The speaker uses Thai, sometimes with English words. "
               "Output only the transcript text, nothing else. If there is no clear speech, output nothing.")
@@ -23,6 +36,7 @@ STT_PROMPT = ("Transcribe this audio exactly as spoken. The speaker uses Thai, s
 SYSTEM_PROMPT = """\
 คุณคือ "เบกกี้" (Beggy) หุ่นยนต์ตั้งโต๊ะตัวเล็กที่ช่วยดูท่านั่ง สภาพแวดล้อมโต๊ะทำงาน และตารางนัดของผู้ใช้
 - ตอบเป็นภาษาไทย สุภาพ เป็นกันเอง สั้นไม่เกิน 2 ประโยค เพราะคำตอบจะถูกอ่านออกเสียง ห้ามใช้ markdown อีโมจิ หรือรายการหัวข้อ
+- เบกกี้พูดด้วยเสียงผู้หญิง: ลงท้ายด้วย ค่ะ / คะ / นะคะ เสมอ และเรียกตัวเองว่า "เบกกี้" (ไม่ใช้ ผม หรือ ครับ)
 - ถ้าผู้ใช้ขอให้หันมาหา มองมาที่ตัวเอง หรือจัดกล้องให้ตรง ให้เรียก center_on_person
 - ถ้าผู้ใช้ถามอุณหภูมิ ความชื้น แสง ฝุ่น ให้เรียก get_environment แล้วตอบด้วยตัวเลขจริง
 - ถ้าถามเรื่องท่านั่ง ให้เรียก get_posture; ถามเรื่องแบตเตอรี่ ให้เรียก get_battery
@@ -46,15 +60,29 @@ def _client():
 class Stt:
     def __init__(self):
         self.client = _client()
-        self.model = os.environ.get("GEMINI_STT_MODEL", STT_MODEL)
+        self.models = _models("GEMINI_STT_MODEL", STT_MODELS)
+        self.last_model = None
 
-    def transcribe(self, wav: bytes) -> str:
+    def transcribe(self, wav: bytes, timeout_s: float = 15) -> str:
+        """Tries each model in turn when one is overloaded (503), slow or out of quota (free tier)."""
         from google.genai import types
-        r = self.client.models.generate_content(
-            model=self.model,
-            contents=[STT_PROMPT, types.Part.from_bytes(data=wav, mime_type="audio/wav")],
-        )
-        return (r.text or "").strip()
+        errors = []
+        for model in self.models:
+            try:
+                r = self.client.models.generate_content(
+                    model=model,
+                    contents=[STT_PROMPT, types.Part.from_bytes(data=wav, mime_type="audio/wav")],
+                    config=types.GenerateContentConfig(thinking_config=_thinking(model),
+                                                       http_options=types.HttpOptions(timeout=int(timeout_s * 1000))),
+                )
+                self.last_model = model
+                return (r.text or "").strip()
+            except Exception as e:
+                if not any(k in str(e) for k in RETRYABLE):
+                    raise
+                log.warning("STT %s unavailable (%s), trying next model", model, str(e)[:80])
+                errors.append(f"{model}: {str(e)[:80]}")
+        raise RuntimeError("all Gemini STT models unavailable (503 UNAVAILABLE): " + " | ".join(errors))
 
 
 def make_tools(robot):
@@ -120,7 +148,7 @@ class Assistant:
 
     def __init__(self, robot, idle_reset_s: float = 300, timeout_s: float = 20):
         self.client = _client()
-        self.models = [m.strip() for m in os.environ.get("GEMINI_MODEL", ",".join(CHAT_MODELS)).split(",") if m.strip()]
+        self.models = _models("GEMINI_MODEL", CHAT_MODELS)
         self.tools = make_tools(robot)
         self.idle_reset_s = idle_reset_s
         self.timeout_ms = int(timeout_s * 1000)
@@ -137,7 +165,7 @@ class Assistant:
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT + f"\nเวลาปัจจุบัน (Asia/Bangkok): {now}",
                 tools=self.tools,
-                thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+                thinking_config=_thinking(model),
                 http_options=types.HttpOptions(timeout=self.timeout_ms),
             ),
         )
@@ -162,4 +190,4 @@ class Assistant:
             self.history = chat.get_history()
             calls = [p.function_call.name for h in new for p in (h.parts or []) if p.function_call]
             return {"reply": (r.text or "").strip(), "tools_called": calls, "model": model}
-        raise RuntimeError("all Gemini models unavailable: " + " | ".join(errors))
+        raise RuntimeError("all Gemini models unavailable (503 UNAVAILABLE): " + " | ".join(errors))

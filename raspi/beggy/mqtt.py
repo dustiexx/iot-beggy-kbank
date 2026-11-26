@@ -37,7 +37,7 @@ class MqttLink:
         if env.mqtt_cert and env.mqtt_key:   # AWS IoT Core: mutual TLS with the thing's certificate
             c.tls_set(ca_certs=env.mqtt_ca, certfile=env.mqtt_cert, keyfile=env.mqtt_key,
                       tls_version=ssl.PROTOCOL_TLS_CLIENT)
-        c.will_set(self.t_status, json.dumps({"type": "status", "online": False}), qos=1, retain=True)
+        c.will_set(self.t_status, json.dumps({"type": "status", "online": False}), qos=1, retain=env.mqtt_retain)
         c.on_connect = self._on_connect
         c.on_disconnect = self._on_disconnect
         c.on_message = self._on_message
@@ -65,7 +65,8 @@ class MqttLink:
     def publish(self, name: str, payload: dict, retain: bool = False, qos: int = 0):
         payload.setdefault("unix_ms", int(time.time() * 1000))
         payload.setdefault("device", self.env.mqtt_client_id)
-        return self.client.publish(self.topic(name), json.dumps(payload, ensure_ascii=False), qos=qos, retain=retain)
+        return self.client.publish(self.topic(name), json.dumps(payload, ensure_ascii=False), qos=qos,
+                                   retain=retain and self.env.mqtt_retain)
 
     # --- callbacks (paho network thread) ---
     def _on_connect(self, client, userdata, flags, reason_code, properties):

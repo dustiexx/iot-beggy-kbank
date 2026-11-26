@@ -79,21 +79,25 @@ Pi ส่งข้อความ 4 แบบ:
 
 ## 🔴 ต้องทำ (สำคัญ: มีผลต่อคะแนน)
 
-- [ ] **AWS IoT Core (broker):** สร้าง thing + certificate + policy แล้วส่ง endpoint + cert ให้ฝั่ง Pi ใส่ `.env` (โค้ดรองรับแล้ว ตอนนี้ใช้ Mosquitto บน Pi ไปก่อน) **ใครถือบัญชี AWS?**
+- [x] **AWS IoT Core (broker):** Pi ต่อ AWS ได้แล้ว (26 พ.ย.)
+- [ ] **ทีม backend: เพิ่ม `iot:RetainPublish` ใน policy ของ thing** ตอนนี้ AWS ตัดการเชื่อมต่อถ้า publish แบบ retain (รวม last will) Pi เลยปิด retain ไว้ก่อน (`MQTT_RETAIN=false`) ทำให้ `beggy/pi/status` ไม่ค้างค่าไว้ **ทีม ESP32 ก็จะโดนเหมือนกันถ้า publish `beggy/esp/env` แบบ retain**
 - [ ] **ทีม backend: History API** ให้เบกกี้ตอบคำถามย้อนหลังได้ เช่น "วันนี้นั่งค่อมนานแค่ไหน" หรือ "ฝุ่นสัปดาห์นี้เป็นยังไง" Pi ทำฝั่งตัวเองเสร็จแล้ว รอ backend ทำ 2 endpoint ตามสเปกด้านบนของไฟล์ `raspi/beggy/history.py` เสร็จแล้วส่ง URL + API key ให้ฝั่ง Pi ใส่ `.env`
 - [ ] **ทีม ESP32:** (1) ยืนยันชื่อ topic และ field JSON ตอนนี้ Pi รออ่าน `beggy/esp/env` เป็น `{"temperature_c", "humidity_pct", "light_lux", "dust_pm25"}` ถ้าใช้ชื่ออื่นบอกฝั่ง Pi (2) publish ด้วย `retain=true` Pi จะได้ค่าล่าสุดทันทีหลังรีสตาร์ท
 - [ ] **วัดผล posture (เกณฑ์ข้อ 9, 2 คะแนน):** นั่งหน้ากล้อง calibrate แล้วรัน `eval_posture.py` ใช้เวลาประมาณ 3 นาที/รอบ ได้ตัวเลข + ภาพใส่สไลด์เลย
-- [ ] **commit + push** งานรอบล่าสุดของ Pi (ยังไม่ได้ commit)
 
 ## 🟡 รอของ / ต้องมีคนทำ
 
 - [ ] **กล้อง Pi Camera Module 3:** รอปริ้นต์ตัวยึด แล้ว calibrate ใหม่ + ทดสอบ (ตอนนี้ใช้ USB webcam อยู่)
-- [ ] **Servo:** ต่อสาย (ไฟจาก 5V ของ UPS HAT, ใส่ capacitor 470–1000 µF), ทดสอบทิศหมุน, เช็กไฟตก `vcgencmd get_throttled`
-- [ ] **ลำโพง:** รอของ แล้วตั้ง `AUDIO_OUT` ในไฟล์ `.env`
-- [ ] **ทดสอบเสียงครบวงจรด้วยไมค์จริง** (ใช้ quota Gemini 2–3 คำถาม)
-- [ ] **Wake word "hey Beggy":** ระบบเทรนพร้อมแล้ว ต้องอัดเสียงจริง:
+- [x] **ลำโพง (MAX98357A):** ต่อสายแล้ว เสียงออก ตั้ง `AUDIO_OUT` แล้ว (26 พ.ย.)
+- [x] **Servo:** ต่อสายแล้ว ใช้ hardware PWM (ไม่สั่น) (26 พ.ย.)
+- [ ] **Servo pan เป็นแบบหมุน 360°** (สั่งเป็นความเร็ว ไม่ใช่มุม) โค้ดใช้วิธีหมุนตามเวลาแทน มุมเป็นค่าประมาณ ไม่แม่นเท่าแบบ 180° ถ้าหาซื้อ SG90 แบบ 180° ได้ เปลี่ยนแล้วตั้ง `pan_continuous = False` ใน `raspi/head/config.py` ได้เลย
+- [ ] **ประกอบหัวเสร็จแล้ว:** หา limit / home / ทิศ (invert) ของ pan + tilt ด้วย `head_main.py`, หันหน้าตรงแล้วรัน `head_main.py pan-zero`
+- [ ] **Capacitor 470–1000 µF ที่ราง 5V ของ servo** (ตอนนี้ไฟ servo มาจาก 5V header ของ Pi, ยังไม่ใส่) เช็ก `vcgencmd get_throttled` ต้องได้ `0x0`
+- [x] **ทดสอบเสียงครบวงจร** STT → Gemini → ลำโพง ใช้ได้แล้ว (26 พ.ย.) ถอดเสียงถูก ~2 วิ, ตอบ ~6–8 วิ ถ้า Gemini ไม่ว่าง (503) จะสลับไปรุ่น lite ตัวอื่นเอง
+- [ ] **ลองพูดกับเบกกี้ด้วยไมค์จริงอีกรอบ** (ตอนนี้ใช้ "hey jarvis" ที่ threshold 0.4)
+- [ ] **Wake word "hey Beggy":** อัดเสียงไปแล้ว 1 คน 37 ครั้ง + เสียงคุยปกติ 10.8 นาที แต่ยังจับผิดบ่อย (~30–140 ครั้ง/ชม.) ต้องได้เสียงคนอื่นเพิ่ม:
   - ทุกคนในทีมพูด "hey Beggy" คนละ 20–40 ครั้ง: `wakeword_train.py record-pos`
-  - อัดเสียงคุยปกติประมาณ 3 นาที: `wakeword_train.py record-neg`
+  - อัดเสียงคุยปกติเพิ่มอีก 20–30 นาที (ดีที่สุดคือหลายคนคุยกัน): `wakeword_train.py record-neg --seconds 600`
   - (ตอนนี้ยังใช้ "hey jarvis" แทน)
 
 ## 🔁 ต้องทำซ้ำเป็นระยะ

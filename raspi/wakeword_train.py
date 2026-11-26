@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample_poly
 
-from voice.audio import Endpointer, Mic, rms, to_wav
+from voice.audio import Endpointer, Mic, MicStalled, rms, to_wav
 from voice.config import VoiceConfig
 
 DATA = Path("wakeword_data")
@@ -91,6 +91,14 @@ def background(bg: np.ndarray | None, rng: random.Random, level: float) -> np.nd
     return np.random.default_rng(rng.randint(0, 1 << 30)).normal(0, 30, WIN).astype(np.float32)
 
 
+REAL_NEG_EXTRA = 2   # extra augmented copies of each real negative window
+
+
+def fit(x: np.ndarray) -> np.ndarray:
+    """Cut or zero-pad to exactly one 2 s window (augment() changes the length)."""
+    return x[:WIN] if len(x) >= WIN else np.pad(x, (0, WIN - len(x)))
+
+
 def augment(x: np.ndarray, rng: random.Random) -> np.ndarray:
     y = x.astype(np.float32)
     s = rng.choice([0.9, 0.95, 1.0, 1.0, 1.05, 1.1])        # speed / pitch perturbation
@@ -142,7 +150,11 @@ def cmd_record_neg(args):
     with Mic(cfg.device, cfg.mic_rate, cfg.rate, cfg.chunk) as mic:
         buf, t_end, part = [], time.time() + args.seconds, 0
         while time.time() < t_end:
-            buf.append(mic.read())
+            try:
+                buf.append(mic.read())
+            except MicStalled as e:                     # keep what we have, don't hang
+                print(f"  mic stopped ({e}) - saving what was recorded", flush=True)
+                break
             if len(buf) * cfg.chunk >= 10 * SR:           # save in 10 s pieces
                 write_wav(NEG / f"real_{int(time.time())}_{part}.wav", np.concatenate(buf))
                 buf, part = [], part + 1
@@ -193,8 +205,11 @@ def build(files_pos, files_neg, bg, rng, aug_per_pos):
             for _ in range(aug_per_pos):                    # same augmentation as positives -> balanced
                 X_neg.append(place(augment(trim(x), rng), bg, rng))
         else:                                               # long recording: sliding windows
-            for i in range(0, len(x) - WIN, SR // 2):
+            for i in range(0, len(x) - WIN, SR // 4):
                 X_neg.append(x[i:i + WIN])
+                if f.name.startswith("real_"):              # real speech is the hard negative: weight it like
+                    for _ in range(REAL_NEG_EXTRA):         # the real positives (louder / quieter / faster copies)
+                        X_neg.append(fit(augment(x[i:i + WIN], rng)))
     for _ in range(max(50, len(X_neg) // 10)):              # pure background / silence
         X_neg.append(np.clip(background(bg, rng, 0.02), -32768, 32767).astype(np.int16))
     return X_pos, X_neg

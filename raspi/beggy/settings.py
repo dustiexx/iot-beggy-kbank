@@ -34,12 +34,14 @@ class Env:
     mqtt_ca: str | None
     mqtt_cert: str | None
     mqtt_key: str | None
+    mqtt_retain: bool           # False if the AWS IoT policy lacks iot:RetainPublish (it drops the connection)
     topic_prefix: str
     # hardware
     camera_source: str          # picam | webcam index | video file
     camera_rotate180: bool
-    head_driver: str            # gpio | pca9685 | fake | sim
+    head_driver: str            # hwpwm | gpio | pca9685 | fake | sim
     mic_device: str
+    audio_gain_db: float        # louder TTS playback (soft-limited), e.g. 8
     audio_out: str              # none = save replies to tts_out/ instead of playing | default | ALSA device e.g. hw:3,0
     wake_mode: str              # wake | off
     ups_enabled: bool
@@ -60,12 +62,14 @@ class Env:
             mqtt_ca=_env("MQTT_CA", None),
             mqtt_cert=_env("MQTT_CERT", None),
             mqtt_key=_env("MQTT_KEY", None),
+            mqtt_retain=_env("MQTT_RETAIN", True, bool),
             topic_prefix=_env("TOPIC_PREFIX", "beggy"),
             camera_source=_env("CAMERA_SOURCE", "picam"),
             camera_rotate180=_env("CAMERA_ROTATE180", False, bool),
             head_driver=_env("HEAD_DRIVER", "fake"),
             mic_device=_env("MIC_DEVICE", "DGM20"),
             audio_out=_env("AUDIO_OUT", "none"),
+            audio_gain_db=_env("AUDIO_GAIN_DB", 0.0, float),
             wake_mode=_env("WAKE_MODE", "wake"),
             ups_enabled=_env("UPS_ENABLED", True, bool),
             api_port=_env("API_PORT", 8080, int),

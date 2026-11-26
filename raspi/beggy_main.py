@@ -19,6 +19,7 @@ API:
     POST /settings    {"posture_bad_after_s": 5, ...}
     POST /cmd         {"action": "center" | "home" | "say", "text": "..."}   (local testing only, not on MQTT)
     POST /ask         {"text": "...", "speak": true}   type to Beggy instead of talking
+    POST /ask_audio   body = 16 kHz mono wav (?speak=0 to stay quiet)   same path as the mic: STT -> Gemini -> TTS
 """
 from __future__ import annotations
 
@@ -144,11 +145,16 @@ class Robot:
         if action == "home":
             return self.head_home()
         if action == "say":
-            sp = Speaker(self.env.audio_out, ROOT / "tts_out")
+            sp = Speaker(self.env.audio_out, ROOT / "tts_out", gain_db=self.env.audio_gain_db)
             return sp.say(str(data.get("text", "")), self.settings.get()["tts_voice"])
         if action == "ask":
-            return self.ask(str(data.get("text", "")), speak=data.get("speak", True), source="mqtt")
+            return self.ask(str(data.get("text", "")), speak=data.get("speak", True), source="api")
         return {"error": f"unknown action {action!r}"}
+
+    def ask_audio(self, wav: bytes, speak=True):
+        if not self.voice:
+            return {"error": "voice disabled"}
+        return self.voice.handle_audio(wav, source="api", speak=speak)
 
     def ask(self, text, speak=True, source="api"):
         if not self.voice:
@@ -186,6 +192,11 @@ def make_api(robot: Robot, settings: Settings):
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.path.split("?")[0] == "/ask_audio":
+                wav = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if wav[:4] != b"RIFF":
+                    return self._send(400, {"error": "body must be a wav file"})
+                return self._send(200, robot.ask_audio(wav, speak="speak=0" not in self.path))
             data = self._body()
             if data is None:
                 return self._send(400, {"error": "body must be JSON"})
@@ -232,11 +243,11 @@ def main() -> int:
         robot.vision = VisionWorker(env, settings, robot.bus)
         workers.append(robot.vision)
     if not args.no_voice:
-        robot.voice = VoiceWorker(env, settings, robot.bus, robot, Speaker(env.audio_out, ROOT / "tts_out"))
+        robot.voice = VoiceWorker(env, settings, robot.bus, robot, Speaker(env.audio_out, ROOT / "tts_out", gain_db=env.audio_gain_db))
         workers.append(robot.voice)
     workers.append(CalendarWorker(robot, robot.bus))
     if not args.no_battery and env.ups_enabled:
-        speaker = Speaker(env.audio_out, ROOT / "tts_out")
+        speaker = Speaker(env.audio_out, ROOT / "tts_out", gain_db=env.audio_gain_db)
         workers.append(BatteryWorker(settings, robot.bus,
                                      say=lambda text: speaker.say(text, settings.get()["tts_voice"])))
     for w in workers:

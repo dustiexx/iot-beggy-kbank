@@ -71,3 +71,13 @@ def test_custom_wake_stream_interface(tmp_path):
     assert abs(scores[-1] - 0.25) < 1e-6        # then the model's probability
     w.reset()
     assert w.predict(np.zeros(1280, np.int16)) == 0.0
+
+
+def test_mic_read_times_out_instead_of_hanging():
+    import queue
+    import pytest
+    from voice.audio import Mic, MicStalled
+    mic = Mic.__new__(Mic)                    # no real device
+    mic.q, mic.factor = queue.Queue(), 1
+    with pytest.raises(MicStalled):
+        mic.read(timeout=0.05)

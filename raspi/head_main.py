@@ -5,6 +5,10 @@
     python head_main.py center --driver sim --source 8 --show   # no servos: simulated head on a USB webcam
     python head_main.py home                           # back to the posture-calibration position
     python head_main.py move 120 90                    # pan, tilt in degrees (test wiring / directions)
+    python head_main.py pan 100 --hold 3               # move ONE servo only (hwpwm), the other stays off;
+    python head_main.py tilt 80 --raw                  #   --raw ignores the limits in head/config.py (to find them)
+    python head_main.py spin 3 --dir 1                 # 360 pan: spin 3 s (+1/-1) to measure deg/s, no position kept
+    python head_main.py pan-zero                       # 360 pan: "the head is at home_pan now" (after lining it up)
 
 Prints JSON lines: {"type": "head_step", ...} while moving, then {"type": "head_center", "status": ...}.
 """
@@ -82,19 +86,54 @@ def cmd_center(args, cfg: HeadConfig, head) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Beggy pan/tilt head")
-    p.add_argument("command", choices=["center", "home", "move"])
-    p.add_argument("angles", nargs="*", type=float, help="for move: PAN TILT")
-    p.add_argument("--driver", help="gpio | pca9685 | fake | sim (default from head/config.py)")
+    p.add_argument("command", choices=["center", "home", "move", "pan", "tilt", "spin", "pan-zero"])
+    p.add_argument("angles", nargs="*", type=float, help="for move: PAN TILT, for pan/tilt: ANGLE, for spin: SECONDS")
+    p.add_argument("--driver", help="hwpwm | gpio | pca9685 | fake | sim (default from head/config.py)")
     p.add_argument("--source", default="picam", help='"picam" or a webcam index like "8"')
     p.add_argument("--rotate180", action="store_true")
     p.add_argument("--show", action="store_true", help="preview window")
+    p.add_argument("--hold", type=float, default=0.5, help="seconds to hold the position before releasing")
+    p.add_argument("--raw", action="store_true", help="pan/tilt: ignore the min/max limits (0..180)")
+    p.add_argument("--dir", type=int, default=1, choices=[1, -1], help="spin: direction")
     args = p.parse_args()
 
     cfg = HeadConfig()
     if args.driver:
         cfg.driver = args.driver
-    head = make_head(cfg)
+    if args.command in ("spin", "pan-zero"):
+        cfg.driver = args.driver or cfg.driver
+        if cfg.driver != "hwpwm" or not cfg.pan_continuous:
+            p.error(f"{args.command} is for the 360 deg pan servo (hwpwm driver, pan_continuous=True)")
+        head = make_head(cfg, home=False)
+        try:
+            if args.command == "pan-zero":
+                head.set_pan_estimate(cfg.home_pan)
+                emit({"type": "head_pos", "pan": head.pan})
+            else:
+                if len(args.angles) != 1:
+                    p.error("spin needs SECONDS")
+                head.spin(args.dir, args.angles[0])
+                emit({"type": "head_spin", "dir": args.dir, "seconds": args.angles[0],
+                      "pulse_ms": cfg.pan_stop_ms + args.dir * cfg.pan_spin_ms})
+        finally:
+            head.close()
+        return 0
+    one_axis = args.command in ("pan", "tilt")
+    if one_axis:
+        if len(args.angles) != 1:
+            p.error(f"{args.command} needs ANGLE")
+        if cfg.driver != "hwpwm":
+            p.error("pan/tilt need --driver hwpwm")
+        if args.raw:
+            cfg.pan_min = cfg.tilt_min = 0.0
+            cfg.pan_max = cfg.tilt_max = 180.0
+    head = make_head(cfg, home=not one_axis)
     try:
+        if one_axis:
+            angle = head.move_one(args.command, args.angles[0])
+            emit({"type": "head_pos", args.command: angle})
+            time.sleep(args.hold)
+            return 0
         if args.command == "home":
             emit({"type": "head_pos", "pan": head.pan, "tilt": head.tilt})
             return 0
@@ -103,7 +142,7 @@ def main() -> int:
                 p.error("move needs PAN TILT")
             pan, tilt = head.move_to(*args.angles)
             emit({"type": "head_pos", "pan": pan, "tilt": tilt})
-            time.sleep(0.5)   # give the servos time to get there before detaching
+            time.sleep(args.hold)   # give the servos time to get there before detaching
             return 0
         return cmd_center(args, cfg, head)
     finally:

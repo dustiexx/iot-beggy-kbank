@@ -48,9 +48,10 @@ class VisionWorker(threading.Thread):
 
         pcfg = PostureConfig()
         hcfg = HeadConfig(driver=self.env.head_driver)
-        head = make_head(hcfg)
         source = open_source(self.env.camera_source, pcfg.width, pcfg.height)
         detector = PoseDetector(pcfg.model_path)
+        # servos last: if the camera fails, the head is never powered up (hwpwm keeps pulsing after a crash)
+        head = make_head(hcfg)
         try:
             baseline = Baseline.load(pcfg.calibration_path)
         except FileNotFoundError:
@@ -153,6 +154,38 @@ class VoiceWorker(threading.Thread):
             from beggy.assistant import Assistant, Stt
             self.stt, self.assistant = Stt(), Assistant(self.robot)
 
+    def handle_audio(self, wav: bytes, source: str = "voice", speak: bool = True) -> dict:
+        """Recorded speech (16 kHz wav) -> STT -> handle_text. Used by the mic loop and POST /ask_audio."""
+        try:
+            self._ensure_ai()
+            t0 = time.time()
+            text = self.stt.transcribe(wav)
+            stt = {"stt_s": round(time.time() - t0, 2), "stt_model": self.stt.last_model}
+            if not text:
+                out = {"type": "no_speech", "source": source, **stt}
+                self.bus("voice", out)
+                return out
+            self.bus("voice", {"type": "transcript", "source": source, "text": text, **stt})
+            return {**self.handle_text(text, source=source, speak=speak), **stt}
+        except Exception as e:   # network / quota problems must not kill the robot
+            log.exception("voice pipeline failed")
+            out = {"type": "voice_error", "source": source, "error": str(e)[:300]}
+            self.bus("voice", out)
+            if speak:
+                self.say_error(e)
+            return out
+
+    def say_error(self, e: Exception) -> None:
+        """Tell the user out loud, so a failed question isn't just silence."""
+        from beggy.assistant import RETRYABLE
+        busy = any(k in str(e) for k in RETRYABLE)
+        text = ("ตอนนี้ระบบคิดของเบกกี้ไม่ว่าง ลองถามใหม่อีกทีนะคะ" if busy
+                else "ขอโทษค่ะ เบกกี้มีปัญหานิดหน่อย ลองถามใหม่อีกครั้งนะคะ")
+        try:
+            self.speaker.say(text, self.settings.get()["tts_voice"])
+        except Exception:
+            log.exception("could not speak the error message")
+
     def handle_text(self, text: str, source: str = "voice", speak: bool = True) -> dict:
         """Text -> Gemini -> reply (spoken). Also used by the API / MQTT 'ask' command."""
         with self.busy:
@@ -167,7 +200,7 @@ class VoiceWorker(threading.Thread):
             return out
 
     def run(self):
-        from voice.audio import Mic, rms, to_wav
+        from voice.audio import Mic, MicStalled, rms, to_wav
         from voice.config import VoiceConfig
         from voice_main import record_utterance
 
@@ -181,40 +214,37 @@ class VoiceWorker(threading.Thread):
             self.reported_dead = True   # not an error: there is just no mic loop
             return
         levels = collections.deque(maxlen=int(3 * vcfg.rate / vcfg.chunk))
-        with Mic(vcfg.device, vcfg.mic_rate, vcfg.rate, vcfg.chunk) as mic:
-            log.info("listening for wake word '%s'", self.settings.get()["wakeword"])
-            while not self.stop_evt.is_set():
-                c = mic.read()
-                levels.append(rms(c))
-                rt = self.settings.get()
-                if not rt["voice_enabled"]:
-                    continue
-                score = wake.predict(c)
-                if score < rt["wake_threshold"]:
-                    continue
-                self.bus("voice", {"type": "wake", "score": round(float(score), 3)})
-                audio = record_utterance(mic, vcfg, float(np.median(levels)) if levels else 100.0)
-                try:
-                    if audio is None:
-                        self.bus("voice", {"type": "no_speech"})
-                    else:
-                        self._ensure_ai()
-                        t0 = time.time()
-                        text = self.stt.transcribe(to_wav(audio, vcfg.rate))
-                        stt_s = round(time.time() - t0, 2)
-                        if not text:
-                            self.bus("voice", {"type": "no_speech", "seconds": round(len(audio) / vcfg.rate, 2)})
+        while not self.stop_evt.is_set():   # reopen the mic if it stalls (USB hiccup) instead of hanging
+            try:
+                with Mic(vcfg.device, vcfg.mic_rate, vcfg.rate, vcfg.chunk) as mic:
+                    log.info("listening for wake word '%s'", self.settings.get()["wakeword"])
+                    last_near = 0.0
+                    while not self.stop_evt.is_set():
+                        c = mic.read()
+                        levels.append(rms(c))
+                        rt = self.settings.get()
+                        if not rt["voice_enabled"]:
+                            continue
+                        score = wake.predict(c)
+                        if score < rt["wake_threshold"]:
+                            if score >= 0.2 and time.monotonic() - last_near > 1.0:   # helps tuning the threshold
+                                last_near = time.monotonic()
+                                log.info("wake near miss: score %.2f < threshold %.2f", score, rt["wake_threshold"])
+                            continue
+                        self.bus("voice", {"type": "wake", "score": round(float(score), 3)})
+                        audio = record_utterance(mic, vcfg, float(np.median(levels)) if levels else 100.0)
+                        if audio is None:
+                            self.bus("voice", {"type": "no_speech"})
                         else:
-                            self.bus("voice", {"type": "transcript", "text": text, "stt_s": stt_s})
-                            self.handle_text(text)
-                except Exception as e:   # network / quota problems must not kill the robot
-                    log.exception("voice pipeline failed")
-                    self.bus("voice", {"type": "voice_error", "error": str(e)[:300]})
-                mic.flush()
-                wake.reset()
-                end = time.time() + vcfg.wake_cooldown_s
-                while time.time() < end:
-                    mic.read()
+                            self.handle_audio(to_wav(audio, vcfg.rate))
+                        mic.flush()
+                        wake.reset()
+                        end = time.time() + vcfg.wake_cooldown_s
+                        while time.time() < end:
+                            mic.read()
+            except MicStalled as e:
+                log.warning("%s - reopening the mic", e)
+                time.sleep(2)
 
 
 # ---------------------------------------------------------------- battery (UPS HAT E, I2C)

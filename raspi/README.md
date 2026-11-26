@@ -7,10 +7,10 @@ One process runs everything on the Pi and talks to the cloud over MQTT:
 | part | what it does |
 |---|---|
 | vision | camera -> MediaPipe posture on the Pi (edge) + pan/tilt head centering |
-| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker |
+| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker. If a model answers 503 "high demand" (common on the free tier), the next lite model takes over: 3.1 → 3.5 → 2.5 flash-lite (`GEMINI_MODEL` / `GEMINI_STT_MODEL`, comma lists). If they all fail, Beggy says so out loud. edge-tts often refuses for a while: after one failure it is skipped for 10 min (gTTS instead) |
 | battery | UPS HAT (E) over I2C: percent, charging, low/critical alerts |
 | mqtt | publishes `beggy/pi/*`, receives sensor board data `beggy/esp/+` and settings `beggy/pi/settings` |
-| api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask` (local testing on the Pi only; the cloud talks to the Pi through MQTT) |
+| api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask`, `POST /ask_audio` (local testing on the Pi only; the cloud talks to the Pi through MQTT) |
 
 MQTT topics:
 
@@ -24,7 +24,7 @@ Publisher = sends the message, subscriber = receives it ("AWS" = IoT Rule to Dyn
 | `beggy/pi/voice` | Pi | AWS | `wake`, `transcript`, `voice_reply` (+ tools Gemini used), `voice_error` |
 | `beggy/pi/head` | Pi | AWS | `head_center` results, `head_pos` |
 | `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | every 5 min `calendar_upcoming` (next 24 h of events) or `calendar_error` (`reason`: `not_connected` / `login_expired` / `api_error`); `calendar_created` / `calendar_deleted` right away when Gemini adds / removes an event |
-| `beggy/pi/status` | Pi | AWS (dashboard) | online/offline (retained, last will) + heartbeat |
+| `beggy/pi/status` | Pi | AWS (dashboard) | online/offline (retained if `MQTT_RETAIN`, last will) + heartbeat |
 | `beggy/pi/settings` | AWS (backend / dashboard) | Pi | runtime settings from the dashboard |
 | `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | which settings were applied / ignored |
 
@@ -33,6 +33,7 @@ cp .env.example .env          # Gemini key, broker, camera, drivers
 python beggy_main.py
 curl localhost:8080/status
 curl -X POST localhost:8080/ask -d '{"text": "ตอนนี้ฝุ่นเยอะไหม"}'
+curl -X POST localhost:8080/ask_audio --data-binary @question.wav   # 16 kHz mono wav, same path as the mic (?speak=0 = no TTS)
 curl -X POST localhost:8080/cmd -d '{"action": "center"}'
 mosquitto_sub -t 'beggy/#' -v   # watch everything
 ```
@@ -142,18 +143,47 @@ Other events: `no_speech` (woke but nobody talked), `voice_error` (Gemini/networ
 
 Pan/tilt servos on the Pi. `center` looks at the MediaPipe pose, aims at the point between the nose and the middle of the shoulders, and nudges the servos toward it until it is within `deadband` of the frame center (or times out / loses the person / hits a limit). Settings: `head/config.py`.
 
-Drivers: `gpio` (servo signal wires on GPIO12 pan / GPIO13 tilt, servos powered from a separate 5 V supply with common ground), `pca9685` (I2C servo board, `pip install adafruit-circuitpython-servokit`), `fake` (prints angles), `sim` (no servos: crops a moving window out of a webcam frame so you can test the loop).
+Drivers: `hwpwm` (Pi 5 hardware PWM through `/sys/class/pwm`: steady pulses, no jitter; the one we use), `gpio` (gpiozero software PWM on the same pins: works but the servos jitter), `pca9685` (I2C servo board, `pip install adafruit-circuitpython-servokit`), `fake` (prints angles), `sim` (no servos: crops a moving window out of a webcam frame so you can test the loop).
+
+**Our servos:** pan is a **360° continuous-rotation SG90** (the pulse sets speed, not angle), tilt is a normal 180° SG90. With `pan_continuous = True` (`head/config.py`) a pan move is a timed spin: `|delta| / pan_deg_s_pos|neg` seconds, then the pulses stop (which stops the servo). The pan angle is only an **estimate**, saved in `head_state.json` so `head_main.py` and `beggy_main.py` share it, and `pan_min`/`pan_max` apply to that estimate so it can't wind up the cables. It drifts over time: line the head up by eye and run `pan-zero` to reset it. Measured speeds (2026-11-26): about 60°/s toward + (1.55 ms) and 120°/s toward − (1.35 ms).
 
 ```bash
 python head_main.py center --driver sim --source 8 --show   # test without servos
-python head_main.py move 120 90      # wiring check: should look left. Wrong way? set pan_invert/tilt_invert
-python head_main.py center           # real servos
-python head_main.py home             # back to the position used for posture calibration
+python head_main.py tilt 100 --hold 3   # move ONE servo only (the other stays off); --raw ignores the limits
+python head_main.py pan 110             # 360 pan: timed spin from the estimated angle
+python head_main.py spin 3 --dir 1      # 360 pan: spin 3 s to measure deg/s (mark the horn, count the turn)
+python head_main.py pan-zero            # 360 pan: "the head is at home_pan now"
+python head_main.py move 120 90         # both servos. Wrong way when centering? set pan_invert/tilt_invert
+python head_main.py center              # real servos
+python head_main.py home                # back to the position used for posture calibration
 ```
 
 Output: `{"type": "head_center", "status": "centered" | "no_person" | "timeout" | "at_limit", "pan": .., "tilt": ..}`.
 
 Posture readings are only valid at the home position: call `home` before checking posture again after centering.
+
+## Wiring (speaker + servos)
+
+| Part | Pi pin |
+|---|---|
+| MAX98357A amp | BCLK GPIO18, LRC GPIO19, DIN GPIO21, VIN 5 V (pin 2), GND. SD_MODE not connected (amp always on) |
+| SG90 pan (360°) | signal GPIO12 |
+| SG90 tilt (180°) | signal GPIO13 |
+
+The servos are powered from the Pi's **5 V header** (no separate supply), so: no capacitor yet → add 470–1000 µF across the servo 5 V/GND, move one servo at a time, keep moves slow (`slew_deg_s`), and check `vcgencmd get_throttled` (must stay `0x0`). In the bring-up tests (servos and speaker tested separately, never at the same time) it stayed `0x0`.
+
+`/boot/firmware/config.txt` (then reboot):
+
+```
+dtoverlay=max98357a,no-sdmode
+dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
+```
+
+`.env`: `AUDIO_OUT=plughw:CARD=MAX98357A,DEV=0`, `HEAD_DRIVER=hwpwm`. Test the speaker: `aplay -D plughw:CARD=MAX98357A,DEV=0 some.wav`.
+
+## AWS IoT Core
+
+`.env`: `MQTT_HOST=<id>-ats.iot.ap-southeast-1.amazonaws.com`, `MQTT_PORT=8883`, `MQTT_CA/CERT/KEY` = files in `certs/` (gitignored). If the thing's policy has no `iot:RetainPublish`, AWS **drops the connection** on any retained publish, including the last will: set `MQTT_RETAIN=false` (status is then not retained). Watch messages in the AWS console: IoT Core → MQTT test client → subscribe `beggy/#`.
 
 ## Run on boot (systemd)
 

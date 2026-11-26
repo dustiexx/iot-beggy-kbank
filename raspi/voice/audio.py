@@ -18,6 +18,10 @@ def find_input_device(name_part: str) -> int:
     raise RuntimeError(f"no input device matching {name_part!r} - run `voice_main.py devices`")
 
 
+class MicStalled(RuntimeError):
+    pass
+
+
 class Mic:
     """Reads the USB mic at its native rate and yields 16 kHz int16 chunks of `chunk` samples."""
 
@@ -50,8 +54,13 @@ class Mic:
         while not self.q.empty():
             self.q.get_nowait()
 
-    def read(self) -> np.ndarray:
-        raw = self.q.get()
+    def read(self, timeout: float = 3.0) -> np.ndarray:
+        """Next chunk. Raises MicStalled if the device stops delivering audio (USB hiccup), instead of
+        blocking forever."""
+        try:
+            raw = self.q.get(timeout=timeout)
+        except queue.Empty:
+            raise MicStalled(f"no audio from the mic for {timeout:.0f} s") from None
         return to_16k(raw, self.factor)
 
 

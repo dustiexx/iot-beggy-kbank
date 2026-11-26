@@ -1,5 +1,17 @@
 """Tunable settings for the voice pipeline: wake word -> record -> Gemini."""
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def _mic_from_env() -> str:
+    """MIC_DEVICE from the environment or raspi/.env, so the test scripts use the same mic as beggy_main."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    except ImportError:
+        pass
+    return os.environ.get("MIC_DEVICE") or "DGM20"
 
 SYSTEM_PROMPT = """\
 You are Beggy, a small friendly desk robot that helps the user sit well and stay focused.
@@ -14,7 +26,7 @@ If the clip has no clear speech, set `transcript` to an empty string and `reply`
 @dataclass
 class VoiceConfig:
     # --- microphone ---
-    device: str = "DGM20"            # part of the input device name (see `voice_main.py devices`)
+    device: str = field(default_factory=_mic_from_env)   # part of the input device name (`voice_main.py devices`)
     mic_rate: int = 48000            # what the USB mic supports; resampled to 16 kHz in code
     rate: int = 16000                # what the wake word model and Gemini get
     chunk: int = 1280                # 80 ms at 16 kHz (openWakeWord frame size)

@@ -76,3 +76,124 @@ def test_battery_low_cell_voltage_counts_as_10_percent():
     from beggy.workers import BatteryAlerts
     a = BatteryAlerts()
     assert a.update(_r(55, cell=3.40)) == 10           # gauge says 55 % but a cell is nearly empty
+
+
+# --- voice error handling (no real Gemini) ---
+import types as _types
+
+import pytest
+
+from beggy import assistant as _assistant
+from beggy.workers import VoiceWorker
+
+
+class _FakeModels:
+    def __init__(self, errors):
+        self.errors, self.used = list(errors), []
+
+    def generate_content(self, model, **kw):
+        self.used.append(model)
+        if self.errors:
+            raise self.errors.pop(0)
+        return _types.SimpleNamespace(text=" สวัสดี ")
+
+
+def _stt(errors, models=("lite-a", "lite-b", "lite-c")):
+    stt = _assistant.Stt.__new__(_assistant.Stt)
+    stt.models, stt.last_model = list(models), None
+    stt.client = _types.SimpleNamespace(models=_FakeModels(errors))
+    return stt
+
+
+def test_stt_falls_back_to_the_next_model_when_busy():
+    stt = _stt([RuntimeError("503 UNAVAILABLE high demand")])
+    assert stt.transcribe(b"wav") == "สวัสดี"
+    assert stt.client.models.used == ["lite-a", "lite-b"] and stt.last_model == "lite-b"
+
+
+def test_stt_gives_up_when_every_model_is_busy():
+    stt = _stt([RuntimeError("503 UNAVAILABLE")] * 3)
+    with pytest.raises(RuntimeError, match="UNAVAILABLE"):
+        stt.transcribe(b"wav")
+    assert len(stt.client.models.used) == 3
+
+
+def test_stt_does_not_retry_other_errors():
+    stt = _stt([ValueError("400 bad request")])
+    with pytest.raises(ValueError):
+        stt.transcribe(b"wav")
+    assert stt.client.models.used == ["lite-a"]
+
+
+def test_thinking_config_matches_the_model_generation():
+    assert _assistant._thinking("gemini-2.5-flash-lite").thinking_budget == 0
+    assert _assistant._thinking("gemini-3.1-flash-lite").thinking_level is not None
+
+
+def test_voice_error_is_spoken(tmp_path):
+    said = []
+    speaker = _types.SimpleNamespace(say=lambda text, voice: said.append(text))
+    w = VoiceWorker(None, Settings(tmp_path / "s.json"), lambda *a: None, None, speaker)
+    w.say_error(RuntimeError("503 UNAVAILABLE"))
+    w.say_error(ValueError("boom"))
+    assert "ไม่ว่าง" in said[0] and "ขอโทษ" in said[1]
+
+
+def test_soft_limit_boosts_without_clipping():
+    import numpy as np
+    from beggy.tts import soft_limit
+    x = np.array([0, 1000, -1000, 20000, -32768], np.int16)
+    y = soft_limit(x, 6.0)
+    assert abs(int(y[1]) - 1995) <= 2 and abs(int(y[2]) + 1995) <= 2   # +6 dB below the knee
+    assert np.abs(y.astype(int)).max() < 32767 and y[3] > 20000 and y[4] < -20000
+    assert (soft_limit(x, 0.0)[:3] == x[:3]).all()
+
+
+def _worker(tmp_path, stt_text=None, stt_error=None):
+    events, said = [], []
+    speaker = _types.SimpleNamespace(say=lambda text, voice: said.append(text) or {"engine": "fake"})
+    w = VoiceWorker(None, Settings(tmp_path / "s.json"), lambda name, p: events.append(p), None, speaker)
+
+    def transcribe(wav):
+        if stt_error:
+            raise stt_error
+        return stt_text
+    w.stt = _types.SimpleNamespace(transcribe=transcribe, last_model="lite-a")
+    w.assistant = _types.SimpleNamespace(ask=lambda text: {"reply": "ฝุ่นน้อยครับ", "tools_called": ["get_environment"],
+                                                           "model": "lite-a"})
+    return w, events, said
+
+
+def test_handle_audio_runs_stt_then_gemini_then_tts(tmp_path):
+    w, events, said = _worker(tmp_path, stt_text="ฝุ่นเยอะไหม")
+    out = w.handle_audio(b"RIFF...", source="api")
+    assert [e["type"] for e in events] == ["transcript", "voice_reply"]
+    assert out["transcript"] == "ฝุ่นเยอะไหม" and out["reply"] == "ฝุ่นน้อยครับ" and out["stt_model"] == "lite-a"
+    assert said == ["ฝุ่นน้อยครับ"]
+
+
+def test_handle_audio_no_speech_and_errors(tmp_path):
+    w, events, said = _worker(tmp_path, stt_text="")
+    assert w.handle_audio(b"RIFF")["type"] == "no_speech" and said == []
+    w, events, said = _worker(tmp_path, stt_error=RuntimeError("503 UNAVAILABLE"))
+    assert w.handle_audio(b"RIFF")["type"] == "voice_error" and "ไม่ว่าง" in said[0]
+    w, events, said = _worker(tmp_path, stt_error=RuntimeError("503 UNAVAILABLE"))
+    w.handle_audio(b"RIFF", speak=False)
+    assert said == []
+
+
+def test_edge_tts_is_paused_after_a_failure(monkeypatch, tmp_path):
+    from beggy import tts
+    calls = []
+
+    def edge(*a):
+        calls.append(1)
+        raise RuntimeError("No audio was received")
+    monkeypatch.setattr(tts, "_edge", edge)
+    monkeypatch.setattr(tts, "_gtts", lambda text, timeout: b"mp3")
+    sp = tts.Speaker("none", tmp_path)
+    assert sp.synth("ก", "v")[2] == "gtts" and sp.synth("ข", "v")[2] == "gtts"
+    assert len(calls) == 1                       # second reply skipped edge-tts
+    sp.edge_skip_until = 0                       # pause over -> tried again
+    sp.synth("ค", "v")
+    assert len(calls) == 2
