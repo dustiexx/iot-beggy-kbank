@@ -65,10 +65,12 @@ def cmd_level(args, cfg) -> int:
     return 0
 
 
-def record_utterance(mic: Mic, cfg: VoiceConfig, noise_floor: float):
-    ep = Endpointer(noise_floor, cfg.chunk / cfg.rate, cfg.start_timeout_s, cfg.end_silence_s,
+def record_utterance(mic: Mic, cfg: VoiceConfig, noise_floor: float, preroll=None, start_timeout_s=None):
+    """`preroll`: audio chunks from just before the wake word fired. People often say the question
+    straight after "hey Beggy" and the detector fires a moment late, so without it the first words are lost."""
+    ep = Endpointer(noise_floor, cfg.chunk / cfg.rate, start_timeout_s or cfg.start_timeout_s, cfg.end_silence_s,
                     cfg.max_record_s, cfg.speech_factor, cfg.min_speech_rms)
-    pre = collections.deque(maxlen=4)   # keep ~0.3 s before speech starts so the first syllable isn't cut
+    pre = collections.deque(preroll or [], maxlen=4 + len(preroll or []))   # + ~0.3 s before speech starts
     chunks: list[np.ndarray] = []
     while True:
         c = mic.read()

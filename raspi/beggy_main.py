@@ -24,6 +24,7 @@ API:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import signal
@@ -112,10 +113,15 @@ class Robot:
         try:
             if op == "list":
                 return {"events": self._cal.list_events(float(args.get("days_ahead", 1)))}
+            self._cal_cache = None    # any change: Gemini's view of the calendar must be refreshed
             if op == "create":
                 ev = self._cal.create_event(args["title"], args["start"], args["end"])
                 self.bus("calendar", {"type": "calendar_created", **ev})
                 return {"created": ev}
+            if op == "update":
+                ev = self._cal.update_event(args["event_id"], args.get("title"), args.get("start"), args.get("end"))
+                self.bus("calendar", {"type": "calendar_updated", **ev})
+                return {"updated": ev}
             if op == "delete":
                 ev = self._cal.delete_event(args["event_id"])
                 self.bus("calendar", {"type": "calendar_deleted", **ev})
@@ -131,6 +137,21 @@ class Robot:
         except Exception as e:   # bad dates from the model, network, API errors -> let Gemini explain
             log.warning("calendar %s failed: %s", op, e)
             return {"error": str(e)[:200], "reason": "api_error"}
+
+    CAL_CACHE_S = 120
+
+    def calendar_context(self) -> list | None:
+        """The next 7 days of events (with ids) for Gemini's instructions, so it can answer / edit / delete
+        without a list_calendar_events round trip first. Cached; cleared whenever Beggy changes an event."""
+        cache = getattr(self, "_cal_cache", None)
+        if cache and time.time() - cache[0] >= self.CAL_CACHE_S:   # old: answer now, refresh in the background
+            threading.Thread(target=self._refresh_cal_cache, name="cal-refresh", daemon=True).start()
+        return cache[1] if cache else self._refresh_cal_cache()
+
+    def _refresh_cal_cache(self):
+        events = self.calendar("list", {"days_ahead": 7}).get("events")
+        self._cal_cache = (time.time(), events) if events is not None else None
+        return events
 
     def status(self):
         with self.lock:
@@ -272,6 +293,9 @@ def main() -> int:
                 w.reported_dead = True
 
     log.info("shutting down")
+    # If something (mic, camera, a library thread) keeps the process alive, print every thread's stack
+    # to the journal and exit after 10 s instead of making systemd wait 90 s and SIGKILL us.
+    faulthandler.dump_traceback_later(10, exit=True)
     for w in workers:
         w.stop_evt.set()
     api.shutdown()

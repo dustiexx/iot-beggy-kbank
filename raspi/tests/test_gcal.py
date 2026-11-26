@@ -26,6 +26,12 @@ class FakeEvents:
         self.calls.append(("delete", eventId))
         return type("R", (), {"execute": lambda self: ""})()
 
+    def patch(self, calendarId, eventId, body):
+        self.calls.append(("patch", eventId, body))
+        ev = {"id": eventId, "summary": "IoT meeting", "start": {"dateTime": "2026-11-24T14:00:00+07:00"},
+              "end": {"dateTime": "2026-11-24T15:00:00+07:00"}, **body}
+        return type("R", (), {"execute": lambda self: ev})()
+
     def insert(self, calendarId, body):
         self.calls.append(("insert", body))
         return type("R", (), {"execute": lambda self: {"id": "new", **body}})()
@@ -111,3 +117,27 @@ def test_delete_returns_what_was_deleted_and_publishes():
     assert sent == [("calendar", {"type": "calendar_deleted", "id": "e1", "title": "IoT meeting",
                                   "start": "2026-11-24T14:00:00+07:00", "end": "2026-11-24T15:00:00+07:00",
                                   "all_day": False, "location": None})]
+
+
+def test_update_event_patches_only_what_changes():
+    svc = FakeService()
+    ev = Calendar(svc).update_event("e1", start_iso="2026-11-24T13:00:00", end_iso="2026-11-24T16:00:00")
+    _, eid, body = svc.ev.calls[0]
+    assert eid == "e1" and "summary" not in body
+    assert body["start"]["dateTime"] == "2026-11-24T13:00:00+07:00" and ev["end"] == "2026-11-24T16:00:00+07:00"
+    with pytest.raises(ValueError):
+        Calendar(svc).update_event("e1")
+
+
+def test_calendar_context_is_cached_and_cleared_on_changes():
+    from beggy_main import Robot
+    svc = FakeService()
+    r = Robot.__new__(Robot)
+    r._cal = Calendar(svc)
+    r.bus = lambda topic, payload: None
+    assert [e["id"] for e in r.calendar_context()] == ["a", "b"]
+    r.calendar_context()
+    assert [c[0] for c in svc.ev.calls] == ["list"]                   # second question: no API call
+    r.calendar("update", {"event_id": "a", "title": "ย้ายแล้ว"})
+    r.calendar_context()
+    assert [c[0] for c in svc.ev.calls] == ["list", "patch", "list"]  # refreshed after the change

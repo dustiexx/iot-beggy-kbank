@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import queue
+import threading
 import wave
 from dataclasses import dataclass
 
@@ -47,8 +48,17 @@ class Mic:
         return self
 
     def __exit__(self, *exc):
-        self.stream.stop()
-        self.stream.close()
+        # After a stall, a normal stop() can block for minutes waiting on the dead device: abort it
+        # in a helper thread and give up after 2 s so the caller can reopen / exit.
+        def close():
+            try:
+                self.stream.abort()
+                self.stream.close()
+            except Exception:  # noqa: BLE001 - best effort on a broken device
+                pass
+        t = threading.Thread(target=close, name="mic-close", daemon=True)
+        t.start()
+        t.join(2.0)
 
     def flush(self):
         while not self.q.empty():

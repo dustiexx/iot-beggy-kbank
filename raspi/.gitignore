@@ -12,3 +12,4 @@ eval_out/
 secrets/
 wakeword_data/
 head_state.json
+voice_debug/

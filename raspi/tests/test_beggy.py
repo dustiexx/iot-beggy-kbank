@@ -149,7 +149,7 @@ def test_soft_limit_boosts_without_clipping():
     assert (soft_limit(x, 0.0)[:3] == x[:3]).all()
 
 
-def _worker(tmp_path, stt_text=None, stt_error=None):
+def _worker(tmp_path, stt_text=None, stt_error=None, audio_error=None):
     events, said = [], []
     speaker = _types.SimpleNamespace(say=lambda text, voice: said.append(text) or {"engine": "fake"})
     w = VoiceWorker(None, Settings(tmp_path / "s.json"), lambda name, p: events.append(p), None, speaker)
@@ -159,8 +159,16 @@ def _worker(tmp_path, stt_text=None, stt_error=None):
             raise stt_error
         return stt_text
     w.stt = _types.SimpleNamespace(transcribe=transcribe, last_model="lite-a")
-    w.assistant = _types.SimpleNamespace(ask=lambda text: {"reply": "ฝุ่นน้อยครับ", "tools_called": ["get_environment"],
-                                                           "model": "lite-a"})
+    asked = []
+
+    def ask(text=None, audio=None):
+        asked.append("audio" if audio is not None else text)
+        if audio is not None and audio_error:
+            raise audio_error
+        return {"reply": "ฝุ่นน้อยครับ", "tools_called": ["get_environment"], "model": "lite-a"}
+    w.assistant = _types.SimpleNamespace(ask=ask, set_last_question=lambda t: asked.append(("history", t)))
+    w.asked = asked
+    w.DEBUG_DIR = tmp_path / "voice_debug"
     return w, events, said
 
 
@@ -170,14 +178,27 @@ def test_handle_audio_runs_stt_then_gemini_then_tts(tmp_path):
     assert [e["type"] for e in events] == ["transcript", "voice_reply"]
     assert out["transcript"] == "ฝุ่นเยอะไหม" and out["reply"] == "ฝุ่นน้อยครับ" and out["stt_model"] == "lite-a"
     assert said == ["ฝุ่นน้อยครับ"]
+    assert w.asked == ["audio", ("history", "ฝุ่นเยอะไหม")]       # one Gemini question, straight from the audio
+
+
+def test_handle_audio_falls_back_to_the_transcript(tmp_path):
+    w, events, said = _worker(tmp_path, stt_text="ฝุ่นเยอะไหม", audio_error=RuntimeError("400 audio"))
+    out = w.handle_audio(b"RIFF")
+    assert out["type"] == "voice_reply" and w.asked == ["audio", "ฝุ่นเยอะไหม"] and said == ["ฝุ่นน้อยครับ"]
+
+
+def test_handle_audio_keeps_the_answer_when_only_stt_fails(tmp_path):
+    w, events, said = _worker(tmp_path, stt_error=RuntimeError("STT broke"))
+    assert w.handle_audio(b"RIFF")["type"] == "voice_reply" and said == ["ฝุ่นน้อยครับ"]
 
 
 def test_handle_audio_no_speech_and_errors(tmp_path):
     w, events, said = _worker(tmp_path, stt_text="")
     assert w.handle_audio(b"RIFF")["type"] == "no_speech" and said == []
-    w, events, said = _worker(tmp_path, stt_error=RuntimeError("503 UNAVAILABLE"))
+    busy = RuntimeError("503 UNAVAILABLE")
+    w, events, said = _worker(tmp_path, stt_error=busy, audio_error=busy)
     assert w.handle_audio(b"RIFF")["type"] == "voice_error" and "ไม่ว่าง" in said[0]
-    w, events, said = _worker(tmp_path, stt_error=RuntimeError("503 UNAVAILABLE"))
+    w, events, said = _worker(tmp_path, stt_error=busy, audio_error=busy)
     w.handle_audio(b"RIFF", speak=False)
     assert said == []
 
@@ -228,3 +249,52 @@ def test_local_whisper_can_be_turned_off():
     from beggy.local_stt import make_local_stt
     assert make_local_stt("off") is None and make_local_stt("") is None
     assert make_local_stt("base").name == "whisper-base"
+
+
+def test_gemini_timeouts_respect_api_minimum():
+    """Gemini rejects request deadlines under 10 s (400 INVALID_ARGUMENT)."""
+    import inspect
+    from beggy.assistant import Assistant, Stt
+    assert inspect.signature(Stt.transcribe).parameters["timeout_s"].default >= 10
+    assert inspect.signature(Assistant.__init__).parameters["timeout_s"].default >= 10
+
+
+def test_tts_does_not_wait_for_edge_to_fail_before_gtts(monkeypatch, tmp_path):
+    import time as _t
+    from beggy import tts
+    started = []
+    monkeypatch.setattr(tts, "_edge", lambda *a: (_t.sleep(0.3), (_ for _ in ()).throw(TimeoutError()))[1])
+    monkeypatch.setattr(tts, "_gtts", lambda text, timeout: started.append(_t.monotonic()) or b"mp3")
+    sp = tts.Speaker("none", tmp_path, edge_timeout=0.3)
+    t0 = _t.monotonic()
+    assert sp.synth("ก", "v")[2] == "gtts"
+    assert started[0] - t0 < 0.2                 # gTTS started together with edge-tts, not after it failed
+
+
+def test_tts_prefers_edge_when_it_answers(monkeypatch, tmp_path):
+    from beggy import tts
+    monkeypatch.setattr(tts, "_edge", lambda *a: b"edge")
+    monkeypatch.setattr(tts, "_gtts", lambda text, timeout: b"g")
+    assert tts.Speaker("none", tmp_path).synth("ก", "v")[:3] == (b"edge", "mp3", "edge-tts")
+
+
+def test_is_question_uses_the_female_particles():
+    from beggy.workers import is_question
+    assert is_question("จะให้นัดเรื่องอะไร เวลาไหนดีคะ") and is_question("Which time?")
+    assert not is_question("ห้าทุ่มสิบห้านาทีค่ะ") and not is_question("พักผ่อนได้แล้วนะคะ") and not is_question("")
+
+
+def test_handle_audio_speaks_without_waiting_for_slow_stt(tmp_path):
+    import time as _t
+    w, events, said = _worker(tmp_path)
+    w.stt = _types.SimpleNamespace(transcribe=lambda wav: (_t.sleep(2.0), "ฝุ่นเยอะไหม")[1], last_model="lite-a")
+    t0 = _t.monotonic()
+    out = w.handle_audio(b"RIFF")
+    assert out["type"] == "voice_reply" and said == ["ฝุ่นน้อยครับ"] and _t.monotonic() - t0 < 1.6
+    _t.sleep(1.5)
+    assert any(e.get("late") and e["text"] == "ฝุ่นเยอะไหม" for e in events)   # transcript still published
+
+
+def test_follow_up_detects_questions_ending_in_ka():
+    from beggy.workers import is_question
+    assert is_question("ได้เลยค่ะ เบกกี้ขอทราบเวลาเริ่มของนัดหมายด้วยนะคะ แล้วเบกกี้จะสร้างนัดให้ค่ะ")

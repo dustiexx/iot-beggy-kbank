@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample_poly
 
-from voice.audio import Endpointer, Mic, MicStalled, rms, to_wav
+from voice.audio import Endpointer, Mic, rms, to_wav
 from voice.config import VoiceConfig
 
 DATA = Path("wakeword_data")
@@ -147,20 +147,22 @@ def cmd_record_neg(args):
     NEG.mkdir(parents=True, exist_ok=True)
     print(f"Recording {args.seconds:.0f} s of NOT-wake-word audio: talk normally, read something aloud, "
           f"type, play music... just don't say 'hey Beggy'.")
-    with Mic(cfg.device, cfg.mic_rate, cfg.rate, cfg.chunk) as mic:
-        buf, t_end, part = [], time.time() + args.seconds, 0
-        while time.time() < t_end:
-            try:
-                buf.append(mic.read())
-            except MicStalled as e:                     # keep what we have, don't hang
-                print(f"  mic stopped ({e}) - saving what was recorded", flush=True)
-                break
-            if len(buf) * cfg.chunk >= 10 * SR:           # save in 10 s pieces
-                write_wav(NEG / f"real_{int(time.time())}_{part}.wav", np.concatenate(buf))
-                buf, part = [], part + 1
-                print(f"  {t_end - time.time():4.0f} s left", flush=True)
-        if buf:
-            write_wav(NEG / f"real_{int(time.time())}_{part}.wav", np.concatenate(buf))
+    buf, t_end, part, stalls = [], time.time() + args.seconds, 0, 0
+    while time.time() < t_end and stalls < 20:
+        try:
+            with Mic(cfg.device, cfg.mic_rate, cfg.rate, cfg.chunk) as mic:
+                while time.time() < t_end:
+                    buf.append(mic.read())
+                    if len(buf) * cfg.chunk >= 10 * SR:       # save in 10 s pieces
+                        write_wav(NEG / f"real_{int(time.time())}_{part}.wav", np.concatenate(buf))
+                        buf, part = [], part + 1
+                        print(f"  {t_end - time.time():4.0f} s left", flush=True)
+        except Exception as e:  # noqa: BLE001 - MicStalled, or the device still busy after a stall: retry
+            stalls += 1
+            print(f"  mic problem ({e}) - reopening ({stalls})", flush=True)
+            time.sleep(2)
+    if buf:
+        write_wav(NEG / f"real_{int(time.time())}_{part}.wav", np.concatenate(buf))
     print(f"saved to {NEG}/")
 
 

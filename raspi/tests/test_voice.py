@@ -81,3 +81,19 @@ def test_mic_read_times_out_instead_of_hanging():
     mic.q, mic.factor = queue.Queue(), 1
     with pytest.raises(MicStalled):
         mic.read(timeout=0.05)
+
+
+def test_record_utterance_keeps_the_preroll():
+    import numpy as np
+    from voice.config import VoiceConfig
+    from voice_main import record_utterance
+    cfg = VoiceConfig(device="x")
+    loud, quiet = np.full(cfg.chunk, 3000, np.int16), np.zeros(cfg.chunk, np.int16)
+    feed = iter([loud] * 5 + [quiet] * 40)
+
+    class FakeMic:
+        def read(self, timeout=3.0):
+            return next(feed)
+    pre = [np.full(cfg.chunk, 7, np.int16)] * 3
+    audio = record_utterance(FakeMic(), cfg, 100.0, preroll=pre)
+    assert audio is not None and (audio[:cfg.chunk] == 7).all()     # the words before the wake fired are kept

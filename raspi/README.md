@@ -7,7 +7,7 @@ One process runs everything on the Pi and talks to the cloud over MQTT:
 | part | what it does |
 |---|---|
 | vision | camera -> MediaPipe posture on the Pi (edge) + pan/tilt head centering |
-| voice | wake word -> STT (Gemini flash-lite) -> thinking with tools (Gemini flash-lite) -> TTS (edge-tts, Thai) -> speaker. If a model answers 503 "high demand" (common on the free tier), the next lite model takes over: 3.1 → 3.5 → 2.5 flash-lite (`GEMINI_MODEL` / `GEMINI_STT_MODEL`, comma lists). If they all fail (or there is no internet), STT falls back to offline Whisper on the Pi (`WHISPER_MODEL=base`, faster-whisper, ~2.4 s, small tone slips like "ฟุ่น" for "ฝุ่น"); if the answer step fails too, Beggy says so out loud. edge-tts often refuses for a while: after one failure it is skipped for 10 min (gTTS instead) |
+| voice | wake word -> Gemini flash-lite answers straight from the recorded audio (with tools), while STT runs in parallel only for the transcript (logs / MQTT; the reply is not held back for it) -> TTS (edge-tts and gTTS race; edge-tts if it is ready within 3 s) -> speaker. The last 1 s before the wake is kept so a question said right after "hey Beggy" isn't cut; when Beggy asks something back it listens 6 s for the answer without the wake word. The next 7 days of calendar events are in Gemini's instructions (cached), so calendar questions skip a list round trip; the last 20 recordings are kept in `voice_debug/` (gitignored). If a model answers 503 "high demand" (common on the free tier), the next lite model takes over: 3.1 → 3.5 → 2.5 flash-lite (`GEMINI_MODEL` / `GEMINI_STT_MODEL`, comma lists). If they all fail (or there is no internet), STT falls back to offline Whisper on the Pi (`WHISPER_MODEL=base`, faster-whisper, ~2.4 s, small tone slips like "ฟุ่น" for "ฝุ่น"); if the answer step fails too, Beggy says so out loud. edge-tts often refuses for a while: after one failure it is skipped for 10 min (gTTS instead) |
 | battery | UPS HAT (E) over I2C: percent, charging, low/critical alerts |
 | mqtt | publishes `beggy/pi/*`, receives sensor board data `beggy/esp/+` and settings `beggy/pi/settings` |
 | api | HTTP on port 8080: `GET /status`, `GET/POST /settings`, `POST /cmd`, `POST /ask`, `POST /ask_audio` (local testing on the Pi only; the cloud talks to the Pi through MQTT) |
@@ -23,7 +23,7 @@ Publisher = sends the message, subscriber = receives it ("AWS" = IoT Rule to Dyn
 | `beggy/pi/battery` | Pi | AWS | `battery_status` every 30 s, `battery_low` warnings at 20 % / 10 % |
 | `beggy/pi/voice` | Pi | AWS | `wake`, `transcript`, `voice_reply` (+ tools Gemini used), `voice_error` |
 | `beggy/pi/head` | Pi | AWS | `head_center` results, `head_pos` |
-| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | every 5 min `calendar_upcoming` (next 24 h of events) or `calendar_error` (`reason`: `not_connected` / `login_expired` / `api_error`); `calendar_created` / `calendar_deleted` right away when Gemini adds / removes an event |
+| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | every 5 min `calendar_upcoming` (next 24 h of events) or `calendar_error` (`reason`: `not_connected` / `login_expired` / `api_error`); `calendar_created` / `calendar_updated` / `calendar_deleted` right away when Gemini adds / moves or renames / removes an event |
 | `beggy/pi/status` | Pi | AWS (dashboard) | online/offline (retained if `MQTT_RETAIN`, last will) + heartbeat |
 | `beggy/pi/settings` | AWS (backend / dashboard) | Pi | runtime settings from the dashboard |
 | `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | which settings were applied / ignored |
@@ -106,7 +106,7 @@ python -m pytest tests
 
 Flow: openWakeWord listens offline for the wake word -> records until you stop talking -> sends the clip to Gemini, which returns the Thai transcript and Beggy's short Thai reply in one call.
 
-The wake word is `hey_jarvis` for now (a ready-made English model) until a custom "hey Beggy" model is trained; swap it with `--wakeword` or in `voice/config.py`.
+The service uses the custom "hey Beggy" model (`settings.json`: `"wakeword": "models/hey_beggy.joblib"`, `"wake_threshold": 0.98`; changing the wake word needs a service restart, the threshold does not). `hey_jarvis` (ready-made, threshold 0.4) is the fallback.
 
 ### Setup
 

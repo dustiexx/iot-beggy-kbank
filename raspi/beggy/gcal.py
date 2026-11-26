@@ -99,6 +99,25 @@ class Calendar:
                 "end": {"dateTime": end.isoformat(), "timeZone": "Asia/Bangkok"}}
         return simplify(self.service.events().insert(calendarId=self.calendar_id, body=body).execute())
 
+    def update_event(self, event_id: str, title: str | None = None, start_iso: str | None = None,
+                     end_iso: str | None = None) -> dict:
+        """Change the title and/or time of an event in one call (keeps its id)."""
+        body: dict = {}
+        if title:
+            body["summary"] = title
+        times = {}
+        for key, iso in (("start", start_iso), ("end", end_iso)):
+            if iso:
+                t = dt.datetime.fromisoformat(iso)
+                times[key] = t if t.tzinfo else t.replace(tzinfo=TZ)
+                body[key] = {"dateTime": times[key].isoformat(), "timeZone": "Asia/Bangkok"}
+        if "start" in times and "end" in times and times["end"] <= times["start"]:
+            raise ValueError("end must be after start")
+        if not body:
+            raise ValueError("nothing to change")
+        return simplify(self.service.events().patch(calendarId=self.calendar_id, eventId=event_id,
+                                                     body=body).execute())
+
     def delete_event(self, event_id: str) -> dict:
         """Deletes the event and returns what it was (title / time), for the dashboard and Gemini."""
         ev = simplify(self.service.events().get(calendarId=self.calendar_id, eventId=event_id).execute())

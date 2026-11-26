@@ -5,6 +5,7 @@ Thinking: text -> reply             (main model, can call tools: robot head, sen
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -31,7 +32,11 @@ def _thinking(model: str):
     return types.ThinkingConfig(thinking_level="minimal")
 
 STT_PROMPT = ("Transcribe this audio exactly as spoken. The speaker uses Thai, sometimes with English words. "
-              "Output only the transcript text, nothing else. If there is no clear speech, output nothing.")
+              "Output only the transcript text, nothing else. If there is no clear speech, output nothing. "
+              "Leave out a wake word at the start (\"hey Beggy\", \"hey Jarvis\"). "
+              "Thai times are words, e.g. บ่ายโมง (13:00), บ่ายสอง, ห้าโมงเย็น, สองทุ่ม, ตีห้า - write them as spoken.")
+
+AUDIO_QUESTION = "(นี่คือเสียงคำถามของผู้ใช้ ตอบสิ่งที่ผู้ใช้พูดในเสียงนี้ ตอนต้นอาจมีคำปลุก เช่น \"hey Beggy\" หรือ \"hey Jarvis\" ติดมา ไม่ต้องสนใจคำนั้น)"
 
 SYSTEM_PROMPT = """\
 คุณคือ "เบกกี้" (Beggy) หุ่นยนต์ตั้งโต๊ะตัวเล็กที่ช่วยดูท่านั่ง สภาพแวดล้อมโต๊ะทำงาน และตารางนัดของผู้ใช้
@@ -43,8 +48,15 @@ SYSTEM_PROMPT = """\
 - ถ้าถามย้อนหลัง (วันนี้ทั้งวัน เมื่อวาน สัปดาห์นี้) ให้ใช้ get_posture_history / get_environment_history
   แล้วสรุปเป็นคำพูดง่าย ๆ เช่น "วันนี้นั่งหลังค่อมรวม 21 นาที" ไม่ต้องอ่านตัวเลขทุกตัว
 - เรื่องตารางนัด ให้ใช้เครื่องมือ calendar ถ้าเครื่องมือตอบว่ายังไม่ได้เชื่อมต่อ ให้บอกผู้ใช้ตรง ๆ
+- เลื่อนเวลาหรือเปลี่ยนชื่อนัด ให้ใช้ update_calendar_event ครั้งเดียว (ห้ามลบแล้วสร้างใหม่)
 - ก่อนลบนัด ให้ถามยืนยันชื่อและเวลานัดกับผู้ใช้ก่อนเสมอ; เวลาที่สร้างนัดให้ใช้เขตเวลา Asia/Bangkok (+07:00)
 - ถ้าผู้ใช้ไม่บอกเวลาจบ ให้นัดยาว 1 ชั่วโมง
+- การบอกเวลาแบบไทย: เที่ยง/เที่ยงตรง = 12:00, บ่ายโมง = 13:00, บ่ายสอง = 14:00 ... บ่ายสามโมง/บ่ายสาม = 15:00,
+  สี่โมงเย็น = 16:00, ห้าโมงเย็น = 17:00, หกโมงเย็น = 18:00, หนึ่งทุ่ม = 19:00 ... ห้าทุ่ม = 23:00, เที่ยงคืน = 00:00,
+  ตีหนึ่ง = 01:00 ... ตีห้า = 05:00, หกโมงเช้า = 06:00 ... สิบเอ็ดโมง = 11:00; "บ่าย" ที่ไม่มีเลขต่อท้ายตรง ๆ เช่น "บ่ายโมง" ไม่ใช่เที่ยง
+- เมื่อสร้างนัดแล้ว ให้บอกชื่อ วัน และเวลาเป็นตัวเลข (เช่น "13:00") ในคำตอบ เพื่อให้ผู้ใช้รู้ทันทีถ้าฟังผิด
+- ถ้าข้อมูลไม่ครบและต้องถามกลับ ให้ถามสั้น ๆ และจบด้วยคำถามที่ลงท้ายด้วย "คะ" เช่น "นัดกี่โมงดีคะ" (เบกกี้จะรอฟังคำตอบเอง ผู้ใช้ไม่ต้องเรียกชื่อใหม่)
+- ตอบเฉพาะสิ่งที่ถาม เช่น ถามเวลาให้บอกแค่เวลา ("ห้าทุ่มหกนาทีค่ะ") ไม่ต้องบอกวันที่ ถ้าไม่ได้ถาม
 - ห้ามเดาค่าที่ไม่รู้
 """
 
@@ -64,7 +76,7 @@ class Stt:
         self.local = local              # LocalWhisper: offline backup when every Gemini model fails
         self.last_model = None
 
-    def transcribe(self, wav: bytes, timeout_s: float = 15) -> str:
+    def transcribe(self, wav: bytes, timeout_s: float = 10) -> str:
         """Tries each Gemini model in turn when one is overloaded (503), slow or out of quota (free tier),
         then the offline Whisper backup. Any other Gemini error (no internet, bad key) goes straight to it."""
         from google.genai import types
@@ -139,13 +151,21 @@ def make_tools(robot):
         period: today, yesterday, last_24_hours, this_week or last_7_days."""
         return robot.history("env", {"metric": metric, "period": period})
 
+    def update_calendar_event(event_id: str, title: str = "", start_iso: str = "", end_iso: str = "") -> dict:
+        """Change an existing event's title and/or time in one step (leave a field empty to keep it).
+        Times are ISO 8601 in Asia/Bangkok, e.g. 2026-11-24T13:00:00+07:00. Use this to move / rename an
+        event instead of deleting and creating it again."""
+        return robot.calendar("update", {"event_id": event_id, "title": title or None,
+                                         "start": start_iso or None, "end": end_iso or None})
+
     def delete_calendar_event(event_id: str) -> dict:
         """Delete a Google Calendar event by its id (get the id from list_calendar_events first).
         Only call this after the user clearly confirmed which event to delete."""
         return robot.calendar("delete", {"event_id": event_id})
 
     return [center_on_person, head_home, get_environment, get_posture, get_battery,
-            get_posture_history, get_environment_history, list_calendar_events, create_calendar_event, delete_calendar_event]
+            get_posture_history, get_environment_history, list_calendar_events, create_calendar_event,
+            update_calendar_event, delete_calendar_event]
 
 
 RETRYABLE = ("503", "504", "429", "UNAVAILABLE", "DEADLINE", "RESOURCE_EXHAUSTED", "timed out", "Timeout")
@@ -157,39 +177,55 @@ class Assistant:
     Models are tried in order: if one is overloaded (503), too slow (504 / timeout) or out of
     free quota (429), the same conversation continues on the next one."""
 
-    def __init__(self, robot, idle_reset_s: float = 300, timeout_s: float = 20):
+    def __init__(self, robot, idle_reset_s: float = 300, timeout_s: float = 10):
         self.client = _client()
         self.models = _models("GEMINI_MODEL", CHAT_MODELS)
+        self.robot = robot
         self.tools = make_tools(robot)
         self.idle_reset_s = idle_reset_s
         self.timeout_ms = int(timeout_s * 1000)
         self.chat = None
         self.history = []
+        self._turn_start = None
         self.last = 0.0
 
     def _make_chat(self, model):
         from google.genai import types
         now = time.strftime("%A %Y-%m-%d %H:%M", time.localtime())
+        extra = ""
+        try:
+            events = self.robot.calendar_context() if hasattr(self.robot, "calendar_context") else None
+        except Exception:  # noqa: BLE001 - the calendar must never block a question
+            events = None
+        if events is not None:
+            compact = [{k: e[k] for k in ("id", "title", "start", "end")} for e in events]
+            extra = ("\nนัดใน 7 วันข้างหน้า (ข้อมูลล่าสุด ใช้ id นี้แก้หรือลบได้เลย ไม่ต้องเรียก list_calendar_events): "
+                     + json.dumps(compact, ensure_ascii=False))
         return self.client.chats.create(
             model=model,
             history=self.history,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT + f"\nเวลาปัจจุบัน (Asia/Bangkok): {now}",
+                system_instruction=SYSTEM_PROMPT + f"\nเวลาปัจจุบัน (Asia/Bangkok): {now}" + extra,
                 tools=self.tools,
                 thinking_config=_thinking(model),
                 http_options=types.HttpOptions(timeout=self.timeout_ms),
             ),
         )
 
-    def ask(self, text: str) -> dict:
+    def ask(self, text: str | None = None, audio: bytes | None = None) -> dict:
+        """Text question, or the recorded question itself (16 kHz wav): Gemini listens to it directly, which
+        saves a whole speech-to-text round trip. Call set_last_question() with the transcript afterwards."""
+        from google.genai import types
         if time.time() - self.last > self.idle_reset_s:
             self.history = []
         self.last = time.time()
+        message = text if audio is None else [types.Part.from_bytes(data=audio, mime_type="audio/wav"),
+                                              AUDIO_QUESTION]
         errors = []
         for model in self.models:
             chat = self._make_chat(model)
             try:
-                r = chat.send_message(text)
+                r = chat.send_message(message)
             except Exception as e:
                 msg = str(e)
                 if any(k in msg for k in RETRYABLE):
@@ -198,7 +234,15 @@ class Assistant:
                     continue
                 raise
             new = chat.get_history()[len(self.history):]   # this turn only
+            self._turn_start = len(self.history)
             self.history = chat.get_history()
             calls = [p.function_call.name for h in new for p in (h.parts or []) if p.function_call]
             return {"reply": (r.text or "").strip(), "tools_called": calls, "model": model}
         raise RuntimeError("all Gemini models unavailable (503 UNAVAILABLE): " + " | ".join(errors))
+
+    def set_last_question(self, text: str) -> None:
+        """Swap the audio of the last question for its transcript: keeps the history small and readable."""
+        from google.genai import types
+        i = getattr(self, "_turn_start", None)
+        if i is not None and i < len(self.history) and self.history[i].role == "user":
+            self.history[i] = types.Content(role="user", parts=[types.Part(text=text)])

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import collections
+import concurrent.futures
 import logging
 import queue
 import threading
 import time
 
 import numpy as np
+
+from beggy.settings import ROOT
 
 log = logging.getLogger("workers")
 
@@ -141,6 +144,21 @@ class VisionWorker(threading.Thread):
 
 
 # ---------------------------------------------------------------- voice: wake -> STT -> Gemini -> TTS
+FOLLOW_UP_S = 6.0   # after Beggy asks a question, wait this long for the answer without a wake word
+
+
+def is_question(reply: str) -> bool:
+    """Beggy speaks as a woman: a question ends in "คะ" (a statement in "ค่ะ" / "นะคะ")."""
+    r = reply.strip().rstrip(" .!")
+    if r.endswith("?") or (r.endswith("คะ") and not r.endswith("นะคะ")):
+        return True
+    return any(w in r for w in QUESTION_WORDS)
+
+
+QUESTION_WORDS = ("ขอทราบ", "ไหม", "มั้ย", "อะไร", "เมื่อไร", "เมื่อไหร่", "กี่โมง", "ที่ไหน", "ใคร",
+                  "หรือเปล่า", "หรือไม่", "ยังไง", "อย่างไร", "แบบไหน", "ช่วยบอก", "ยืนยัน")
+
+
 class VoiceWorker(threading.Thread):
     def __init__(self, env, settings, bus, robot, speaker):
         super().__init__(name="voice", daemon=True)
@@ -156,18 +174,49 @@ class VoiceWorker(threading.Thread):
             self.stt, self.assistant = Stt(make_local_stt(self.env.whisper_model)), Assistant(self.robot)
 
     def handle_audio(self, wav: bytes, source: str = "voice", speak: bool = True) -> dict:
-        """Recorded speech (16 kHz wav) -> STT -> handle_text. Used by the mic loop and POST /ask_audio."""
+        """Recorded speech (16 kHz wav) -> reply. Used by the mic loop and POST /ask_audio.
+
+        Fast path: Gemini answers straight from the audio while STT runs at the same time (the transcript
+        is only for logs / MQTT and to throw the answer away when nobody spoke). If the audio request
+        fails, the old way is used: transcript (Gemini or offline Whisper) -> text question."""
+        audio_s = round((len(wav) - 44) / 32000, 1)   # 16 kHz mono 16-bit
+        self._keep_for_debug(wav)
         try:
             self._ensure_ai()
-            t0 = time.time()
-            text = self.stt.transcribe(wav)
-            stt = {"stt_s": round(time.time() - t0, 2), "stt_model": self.stt.last_model}
-            if not text:
-                out = {"type": "no_speech", "source": source, **stt}
-                self.bus("voice", out)
-                return out
-            self.bus("voice", {"type": "transcript", "source": source, "text": text, **stt})
-            return {**self.handle_text(text, source=source, speak=speak), **stt}
+            with self.busy:
+                pool = concurrent.futures.ThreadPoolExecutor(1)
+                t0 = time.time()
+                stt_job = pool.submit(self.stt.transcribe, wav)
+                pool.shutdown(wait=False)   # the job keeps running; we just never wait for a slow STT
+                reply, think_s = None, 0.0
+                try:
+                    reply = self.assistant.ask(audio=wav)
+                    think_s = round(time.time() - t0, 2)
+                except Exception as e:  # noqa: BLE001 - fall back to the text path below
+                    log.warning("Gemini audio question failed (%s) - using the transcript", str(e)[:100])
+                if reply is not None:
+                    # Gemini already answered from the audio: don't keep the user waiting for the transcript
+                    # (only needed for logs / MQTT and to drop an answer to noise). Late ones are logged later.
+                    try:
+                        text = stt_job.result(timeout=1.0)
+                    except concurrent.futures.TimeoutError:
+                        stt_job.add_done_callback(lambda job: self._late_transcript(job, source, t0))
+                        return self._finish("(transcript pending)", reply, think_s, source, speak)
+                    except Exception:  # noqa: BLE001
+                        log.warning("STT failed, but Gemini already answered from the audio", exc_info=True)
+                        text = "(no transcript)"
+                else:
+                    text = stt_job.result()
+                stt = {"stt_s": round(time.time() - t0, 2), "stt_model": self.stt.last_model, "audio_s": audio_s}
+                if not text:
+                    out = {"type": "no_speech", "source": source, **stt}
+                    self.bus("voice", out)
+                    return out
+                self.bus("voice", {"type": "transcript", "source": source, "text": text, **stt})
+                if reply is None:
+                    return {**self._answer(text, source, speak), **stt}
+                self.assistant.set_last_question(text)
+                return {**self._finish(text, reply, think_s, source, speak), **stt}
         except Exception as e:   # network / quota problems must not kill the robot
             log.exception("voice pipeline failed")
             out = {"type": "voice_error", "source": source, "error": str(e)[:300]}
@@ -175,6 +224,28 @@ class VoiceWorker(threading.Thread):
             if speak:
                 self.say_error(e)
             return out
+
+    DEBUG_DIR = ROOT / "voice_debug"
+    DEBUG_KEEP = 20
+
+    def _keep_for_debug(self, wav: bytes) -> None:
+        """Keep the last few recordings (voice_debug/, gitignored) to check what Gemini actually heard."""
+        try:
+            self.DEBUG_DIR.mkdir(exist_ok=True)
+            (self.DEBUG_DIR / f"q_{time.strftime('%Y%m%d_%H%M%S')}.wav").write_bytes(wav)
+            for old in sorted(self.DEBUG_DIR.glob("q_*.wav"))[:-self.DEBUG_KEEP]:
+                old.unlink()
+        except OSError:
+            pass
+
+    def _late_transcript(self, job, source, t0) -> None:
+        try:
+            text = job.result()
+        except Exception as e:  # noqa: BLE001
+            log.warning("late STT failed: %s", str(e)[:100])
+            return
+        self.bus("voice", {"type": "transcript", "source": source, "text": text, "late": True,
+                           "stt_s": round(time.time() - t0, 2), "stt_model": self.stt.last_model})
 
     def say_error(self, e: Exception) -> None:
         """Tell the user out loud, so a failed question isn't just silence."""
@@ -191,14 +262,19 @@ class VoiceWorker(threading.Thread):
         """Text -> Gemini -> reply (spoken). Also used by the API / MQTT 'ask' command."""
         with self.busy:
             self._ensure_ai()
-            t0 = time.time()
-            r = self.assistant.ask(text)
-            out = {"type": "voice_reply", "source": source, "transcript": text, **r,
-                   "think_s": round(time.time() - t0, 2)}
-            if speak and r["reply"]:
-                out["tts"] = self.speaker.say(r["reply"], self.settings.get()["tts_voice"])
-            self.bus("voice", out)
-            return out
+            return self._answer(text, source, speak)
+
+    def _answer(self, text, source, speak) -> dict:
+        t0 = time.time()
+        r = self.assistant.ask(text)
+        return self._finish(text, r, round(time.time() - t0, 2), source, speak)
+
+    def _finish(self, text, r, think_s, source, speak) -> dict:
+        out = {"type": "voice_reply", "source": source, "transcript": text, **r, "think_s": think_s}
+        if speak and r["reply"]:
+            out["tts"] = self.speaker.say(r["reply"], self.settings.get()["tts_voice"])
+        self.bus("voice", out)
+        return out
 
     def run(self):
         from voice.audio import Mic, MicStalled, rms, to_wav
@@ -215,6 +291,7 @@ class VoiceWorker(threading.Thread):
             self.reported_dead = True   # not an error: there is just no mic loop
             return
         levels = collections.deque(maxlen=int(3 * vcfg.rate / vcfg.chunk))
+        recent = collections.deque(maxlen=int(1.0 * vcfg.rate / vcfg.chunk))   # pre-roll for the question
         while not self.stop_evt.is_set():   # reopen the mic if it stalls (USB hiccup) instead of hanging
             try:
                 with Mic(vcfg.device, vcfg.mic_rate, vcfg.rate, vcfg.chunk) as mic:
@@ -223,6 +300,7 @@ class VoiceWorker(threading.Thread):
                     while not self.stop_evt.is_set():
                         c = mic.read()
                         levels.append(rms(c))
+                        recent.append(c)
                         rt = self.settings.get()
                         if not rt["voice_enabled"]:
                             continue
@@ -233,19 +311,35 @@ class VoiceWorker(threading.Thread):
                                 log.info("wake near miss: score %.2f < threshold %.2f", score, rt["wake_threshold"])
                             continue
                         self.bus("voice", {"type": "wake", "score": round(float(score), 3)})
-                        audio = record_utterance(mic, vcfg, float(np.median(levels)) if levels else 100.0)
+                        noise = float(np.median(levels)) if levels else 100.0
+                        audio = record_utterance(mic, vcfg, noise, preroll=list(recent))
                         if audio is None:
                             self.bus("voice", {"type": "no_speech"})
                         else:
-                            self.handle_audio(to_wav(audio, vcfg.rate))
+                            out = self.handle_audio(to_wav(audio, vcfg.rate))
+                            for _ in range(3):   # Beggy asked something back: listen for the answer, no wake word
+                                if out.get("type") != "voice_reply" or not is_question(out.get("reply", "")):
+                                    break
+                                mic.flush()      # drop Beggy's own voice
+                                self.bus("voice", {"type": "follow_up"})
+                                audio = record_utterance(mic, vcfg, noise, start_timeout_s=FOLLOW_UP_S)
+                                if audio is None:
+                                    break
+                                out = self.handle_audio(to_wav(audio, vcfg.rate))
+                        recent.clear()
                         mic.flush()
                         wake.reset()
                         end = time.time() + vcfg.wake_cooldown_s
-                        while time.time() < end:
-                            mic.read()
+                        while time.time() < end:   # warm the detector up meanwhile, but ignore its scores
+                            c = mic.read()
+                            recent.append(c)
+                            wake.predict(c)
             except MicStalled as e:
                 log.warning("%s - reopening the mic", e)
                 time.sleep(2)
+            except Exception:  # noqa: BLE001 - e.g. the device still busy right after a stall: keep retrying
+                log.exception("mic error - retrying in 5 s")
+                self.stop_evt.wait(5)
 
 
 # ---------------------------------------------------------------- battery (UPS HAT E, I2C)
@@ -323,6 +417,8 @@ class CalendarWorker(threading.Thread):
         self.stop_evt = threading.Event()
 
     def tick(self):
+        if hasattr(self.robot, "_refresh_cal_cache"):   # keep Gemini's 7-day calendar view warm too
+            self.robot._refresh_cal_cache()
         res = self.robot.calendar("list", {"days_ahead": self.hours / 24})
         if "events" in res:
             self.bus("calendar", {"type": "calendar_upcoming", "hours": self.hours, **res})

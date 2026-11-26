@@ -13,6 +13,7 @@ AUDIO_GAIN_DB=8   -> play louder (soft limiter, no hard clipping)
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import logging
 import subprocess
@@ -75,7 +76,7 @@ def boost_file(src: str, fmt: str, dst_wav: str, gain_db: float) -> None:
 
 class Speaker:
     EDGE_PAUSE_S = 600
-    def __init__(self, audio_out: str, out_dir: Path, edge_timeout: float = 6, gtts_timeout: float = 6,
+    def __init__(self, audio_out: str, out_dir: Path, edge_timeout: float = 3, gtts_timeout: float = 6,
                  gain_db: float = 0.0):
         self.audio_out = audio_out
         self.gain_db = gain_db                 # AUDIO_GAIN_DB: louder playback through a soft limiter
@@ -85,22 +86,31 @@ class Speaker:
         self.gtts_timeout = gtts_timeout
 
     def synth(self, text: str, voice: str) -> tuple[bytes, str, str]:
-        """Returns (audio bytes, "mp3" | "wav", engine used)."""
-        if time.monotonic() >= self.edge_skip_until:
-            try:
-                data = _edge(text, voice, self.edge_timeout)
-                if data:
-                    return data, "mp3", "edge-tts"
-                raise RuntimeError("empty audio")
-            except Exception as e:   # it tends to fail for a while: don't waste ~3 s on every reply
-                self.edge_skip_until = time.monotonic() + self.EDGE_PAUSE_S
-                log.warning("edge-tts failed (%s), using gTTS for the next %d min",
-                            str(e)[:100], self.EDGE_PAUSE_S // 60)
+        """Returns (audio bytes, "mp3" | "wav", engine used).
+
+        edge-tts (best voice) and gTTS run at the same time: edge-tts is used if it answers within
+        edge_timeout, otherwise the gTTS audio is already there - no waiting for one to fail first."""
+        pool = concurrent.futures.ThreadPoolExecutor(2)
         try:
-            return _gtts(text, self.gtts_timeout), "mp3", "gtts"
-        except Exception as e:
-            log.warning("gTTS failed: %s", str(e)[:100])
-        return _espeak(text), "wav", "espeak-ng"
+            gtts_job = pool.submit(_gtts, text, self.gtts_timeout)
+            if time.monotonic() >= self.edge_skip_until:
+                edge_job = pool.submit(_edge, text, voice, self.edge_timeout)
+                try:
+                    data = edge_job.result(timeout=self.edge_timeout + 0.5)
+                    if data:
+                        return data, "mp3", "edge-tts"
+                    raise RuntimeError("empty audio")
+                except Exception as e:   # it tends to fail for a while: skip it for a bit
+                    self.edge_skip_until = time.monotonic() + self.EDGE_PAUSE_S
+                    log.warning("edge-tts failed (%s), using gTTS for the next %d min",
+                                str(e)[:100] or type(e).__name__, self.EDGE_PAUSE_S // 60)
+            try:
+                return gtts_job.result(timeout=self.gtts_timeout + 1), "mp3", "gtts"
+            except Exception as e:
+                log.warning("gTTS failed: %s", str(e)[:100] or type(e).__name__)
+            return _espeak(text), "wav", "espeak-ng"
+        finally:
+            pool.shutdown(wait=False)   # don't wait for the slower engine
 
     def say(self, text: str, voice: str) -> dict:
         t0 = time.time()

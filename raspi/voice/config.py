@@ -34,7 +34,7 @@ class VoiceConfig:
     # --- wake word (openWakeWord) ---
     wakeword: str = "hey_jarvis"     # placeholder until a custom "hey beggy" model is trained
     wake_threshold: float = 0.5
-    wake_cooldown_s: float = 2.0     # ignore new wake detections right after one fired
+    wake_cooldown_s: float = 1.5     # ignore new wake detections right after a reply (detector warms up meanwhile)
 
     # --- recording after the wake word ---
     start_timeout_s: float = 5.0     # give up if nobody starts talking within this time
