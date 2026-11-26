@@ -184,9 +184,16 @@ class VoiceWorker(threading.Thread):
         try:
             self._ensure_ai()
             with self.busy:
+                self._turn_speak, self._turn_announced = speak, False
                 pool = concurrent.futures.ThreadPoolExecutor(1)
                 t0 = time.time()
-                stt_job = pool.submit(self.stt.transcribe, wav)
+                stt_took = {}
+
+                def timed_stt():
+                    text = self.stt.transcribe(wav)
+                    stt_took["s"] = round(time.time() - t0, 2)   # when STT really finished (for the log)
+                    return text
+                stt_job = pool.submit(timed_stt)
                 pool.shutdown(wait=False)   # the job keeps running; we just never wait for a slow STT
                 reply, think_s = None, 0.0
                 try:
@@ -207,7 +214,8 @@ class VoiceWorker(threading.Thread):
                         text = "(no transcript)"
                 else:
                     text = stt_job.result()
-                stt = {"stt_s": round(time.time() - t0, 2), "stt_model": self.stt.last_model, "audio_s": audio_s}
+                stt = {"stt_s": stt_took.get("s", round(time.time() - t0, 2)), "stt_model": self.stt.last_model,
+                       "audio_s": audio_s}
                 if not text:
                     out = {"type": "no_speech", "source": source, **stt}
                     self.bus("voice", out)
@@ -227,6 +235,37 @@ class VoiceWorker(threading.Thread):
 
     DEBUG_DIR = ROOT / "voice_debug"
     DEBUG_KEEP = 20
+
+    PROGRESS_SAY = {
+        "history": "รอสักครู่นะคะ เบกกี้กำลังดูข้อมูลย้อนหลังให้ค่ะ",
+    }
+
+    def progress(self, kind: str) -> None:
+        """Called by a slow tool: say what Beggy is doing (once per spoken question, without blocking it).
+        The final answer waits for this to finish playing (Speaker's play lock)."""
+        text = self.PROGRESS_SAY.get(kind)
+        if not text or not getattr(self, "_turn_speak", False) or getattr(self, "_turn_announced", False):
+            return
+        self._turn_announced = True
+        self.bus("voice", {"type": "progress", "kind": kind, "text": text})
+        voice = self.settings.get()["tts_voice"]
+        threading.Thread(target=self._say_quietly, args=(text, voice), name="progress", daemon=True).start()
+
+    def _prepare_progress(self):
+        """Synthesize the "please wait" phrases at start-up so the first one plays instantly."""
+        voice = self.settings.get()["tts_voice"]
+        for text in self.PROGRESS_SAY.values():
+            try:
+                self.speaker.prepare(text, voice)
+            except Exception as e:  # noqa: BLE001 - no internet yet: they'll be made on first use
+                log.info("could not prepare progress phrase: %s", str(e)[:80])
+                return
+
+    def _say_quietly(self, text, voice):
+        try:
+            self.speaker.say(text, voice, cache=True)
+        except Exception:  # noqa: BLE001 - a missed "please wait" must not break the answer
+            log.exception("progress message failed")
 
     def _keep_for_debug(self, wav: bytes) -> None:
         """Keep the last few recordings (voice_debug/, gitignored) to check what Gemini actually heard."""
@@ -262,6 +301,7 @@ class VoiceWorker(threading.Thread):
         """Text -> Gemini -> reply (spoken). Also used by the API / MQTT 'ask' command."""
         with self.busy:
             self._ensure_ai()
+            self._turn_speak, self._turn_announced = speak, False
             return self._answer(text, source, speak)
 
     def _answer(self, text, source, speak) -> dict:
@@ -282,6 +322,8 @@ class VoiceWorker(threading.Thread):
         from voice_main import record_utterance
 
         vcfg = VoiceConfig(device=self.env.mic_device)
+        if hasattr(self.speaker, "prepare"):
+            threading.Thread(target=self._prepare_progress, name="tts-prepare", daemon=True).start()
         wake = None
         if self.env.wake_mode == "wake":
             from voice.wake import make_wake

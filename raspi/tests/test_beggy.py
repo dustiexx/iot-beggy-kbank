@@ -298,3 +298,244 @@ def test_handle_audio_speaks_without_waiting_for_slow_stt(tmp_path):
 def test_follow_up_detects_questions_ending_in_ka():
     from beggy.workers import is_question
     assert is_question("ได้เลยค่ะ เบกกี้ขอทราบเวลาเริ่มของนัดหมายด้วยนะคะ แล้วเบกกี้จะสร้างนัดให้ค่ะ")
+
+
+def test_slow_tool_says_please_wait_once_and_only_when_speaking(tmp_path):
+    import time as _t
+    w, events, said = _worker(tmp_path, stt_text="เมื่อวานฝุ่นเยอะไหม")
+    w.speaker = _types.SimpleNamespace(say=lambda text, voice, cache=False: said.append(text) or {"engine": "fake"})
+
+    def ask(text=None, audio=None):
+        w.progress("calendar_create")         # calendar: no phrase (the reply comes ~1 s later anyway)
+        w.progress("history")
+        w.progress("history")                 # second tool in the same question: no second message
+        return {"reply": "ฝุ่นน้อยค่ะ", "tools_called": ["get_environment_history"], "model": "lite-a"}
+    w.assistant.ask = ask
+    w.handle_audio(b"RIFF")
+    _t.sleep(0.2)
+    assert said.count("รอสักครู่นะคะ เบกกี้กำลังดูข้อมูลย้อนหลังให้ค่ะ") == 1 and "ฝุ่นน้อยค่ะ" in said
+    assert [e["kind"] for e in events if e.get("type") == "progress"] == ["history"]
+    said.clear()
+    w.handle_text("เมื่อวานฝุ่นเยอะไหม", source="api", speak=False)
+    _t.sleep(0.2)
+    assert said == []                         # API questions without speech stay silent
+
+
+def test_speaker_caches_fixed_phrases(monkeypatch, tmp_path):
+    from beggy import tts
+    calls = []
+    monkeypatch.setattr(tts, "_edge", lambda *a: calls.append(1) or b"mp3")
+    monkeypatch.setattr(tts, "_gtts", lambda text, timeout: b"g")
+    sp = tts.Speaker("none", tmp_path)
+    sp.prepare("รอสักครู่", "v")
+    sp.say("รอสักครู่", "v", cache=True)
+    sp.say("รอสักครู่", "v", cache=True)
+    assert len(calls) == 1
+
+
+class _FakeChat:
+    """Scripted Gemini chat: each send_message returns the next (text, [(tool, args), ...])."""
+    def __init__(self, script, history):
+        self.script, self.h, self.sent = script, list(history), []
+
+    def send_message(self, msg):
+        from google.genai import types
+        self.sent.append(msg)
+        text, calls = self.script.pop(0)
+        self.h.append(types.Content(role="user", parts=[types.Part(text=str(msg)[:50])]))
+        fcs = [_types.SimpleNamespace(name=n, args=a) for n, a in calls]
+        parts = [types.Part(function_call=types.FunctionCall(name=n, args=a)) for n, a in calls] or \
+            [types.Part(text=text)]
+        self.h.append(types.Content(role="model", parts=parts))
+        return _types.SimpleNamespace(text=text, function_calls=fcs)
+
+    def get_history(self):
+        return self.h
+
+
+EV = {"id": "e1", "title": "เทส 1", "start": "2026-11-28T13:00:00+07:00", "end": "2026-11-28T14:00:00+07:00",
+      "all_day": False}
+
+
+def _scripted_assistant(script):
+    from beggy.assistant import Assistant
+    a = Assistant.__new__(Assistant)
+    a.models, a.history, a.idle_reset_s, a.last, a._turn_start, a._pending_delete = ["lite-a"], [], 300, 0.0, None, {}
+    a.robot = _types.SimpleNamespace(calendar_context=lambda: [EV])
+    a.ran, a.chats = [], []
+
+    def create_calendar_event(**kw):
+        a.ran.append(("create", kw))
+        return {"created": {**EV, "title": kw.get("title", "เทส 1")}}
+
+    def delete_calendar_event(event_id):
+        a.ran.append(("delete", event_id))
+        return {"deleted": EV}
+
+    def get_environment():
+        a.ran.append(("env",))
+        return {"dust_pm25": 12}
+    a.tools = [create_calendar_event, delete_calendar_event, get_environment]
+
+    def make_chat(model, history=None):
+        c = _FakeChat(script, a.history if history is None else history)
+        a.chats.append(c)
+        return c
+    a._make_chat = make_chat
+    return a
+
+
+def test_calendar_change_is_answered_locally_without_a_second_gemini_call():
+    a = _scripted_assistant([("", [("create_calendar_event", {"title": "เทส 1"})])])
+    r = a.ask("สร้างนัดเทส 1")
+    assert a.ran == [("create", {"title": "เทส 1"})] and len(a.chats) == 1          # one Gemini call only
+    assert r["reply"].startswith("เบกกี้สร้างนัดเทส 1") and "บ่ายโมง ถึง บ่ายสองโมง" in r["reply"]
+    assert [c.role for c in a.history] == ["user", "model", "user", "model"]        # call, result, our reply
+
+
+def test_other_tools_still_let_gemini_write_the_answer():
+    a = _scripted_assistant([("", [("get_environment", {})]), ("ฝุ่นน้อยค่ะ", [])])
+    assert a.ask("ฝุ่นเยอะไหม")["reply"] == "ฝุ่นน้อยค่ะ" and len(a.chats) == 2
+
+
+def test_delete_needs_a_confirmation_turn():
+    a = _scripted_assistant([("", [("delete_calendar_event", {"event_id": "e1"})]),
+                             ("", [("delete_calendar_event", {"event_id": "e1"})])])
+    r = a.ask("ลบนัดเทส 1")
+    assert a.ran == [] and "ใช่ไหมคะ" in r["reply"] and "เทส 1" in r["reply"]        # asked, nothing deleted
+    r = a.ask("ใช่")
+    assert a.ran == [("delete", "e1")] and r["reply"].startswith("เบกกี้ลบนัดเทส 1")
+
+
+def test_gemini_asking_to_confirm_itself_counts():
+    a = _scripted_assistant([("จะให้ลบนัดเทส 1 ใช่ไหมคะ", []),
+                             ("", [("delete_calendar_event", {"event_id": "e1"})])])
+    a.ask("ลบนัดเทส 1")
+    a.ask("ใช่")
+    assert a.ran == [("delete", "e1")]                                              # no second "are you sure"
+
+
+def test_fake_calendar_change_is_retried_then_refused():
+    a = _scripted_assistant([("ลบนัดให้แล้วค่ะ", []), ("", [("create_calendar_event", {"title": "เทส 1"})])])
+    assert a.ask("สร้างนัด")["tools_called"] == ["create_calendar_event"]
+    a = _scripted_assistant([("ลบนัดให้แล้วค่ะ", []), ("ลบนัดให้เรียบร้อยแล้วค่ะ", [])])
+    assert "ไม่สำเร็จ" in a.ask("ลบนัด")["reply"]
+
+
+def test_describe_change_says_the_day():
+    import datetime as dt
+    from beggy.assistant import when
+    assert when(EV, today=dt.date(2026, 11, 27)) == "พรุ่งนี้ บ่ายโมง ถึง บ่ายสองโมง"
+    assert when(EV, today=dt.date(2026, 11, 1)) == "วันที่ 28 พฤศจิกายน บ่ายโมง ถึง บ่ายสองโมง"
+    assert when({"start": "2026-11-28", "all_day": True}, today=dt.date(2026, 11, 28)) == "วันนี้ ทั้งวัน"
+
+
+def test_hedged_asks_the_next_model_when_the_first_is_slow():
+    import time as _t
+    from beggy.assistant import hedged
+
+    def call(model):
+        _t.sleep(1.0 if model == "slow" else 0.05)
+        return model
+    t0 = _t.monotonic()
+    assert hedged(["slow", "fast"], call, "t", hedge_after_s=0.2) == ("fast", "fast")
+    assert _t.monotonic() - t0 < 0.6
+
+
+def test_hedged_moves_on_right_away_after_a_busy_error_and_raises_other_errors():
+    import pytest
+    from beggy.assistant import AllModelsBusy, hedged
+
+    def call(model):
+        if model == "a":
+            raise RuntimeError("503 UNAVAILABLE")
+        return "ok"
+    assert hedged(["a", "b"], call, "t", hedge_after_s=5) == ("b", "ok")
+    with pytest.raises(AllModelsBusy):
+        hedged(["a"], call, "t")
+    with pytest.raises(ValueError):
+        hedged(["x", "b"], lambda m: (_ for _ in ()).throw(ValueError("400 bad")) if m == "x" else "ok", "t")
+
+
+def test_a_losing_attempt_cannot_run_tools():
+    import time as _t
+    from beggy.assistant import guard_tool, hedged
+    ran = []
+    tool = guard_tool(lambda name: ran.append(name) or {"ok": True})
+
+    def call(model):
+        if model == "slow":
+            _t.sleep(0.5)
+            return tool(name="slow")             # wakes up after "fast" already answered
+        return "fast answer"
+    assert hedged(["slow", "fast"], call, "t", hedge_after_s=0.1) == ("fast", "fast answer")
+    _t.sleep(0.6)
+    assert ran == []                             # the late model's calendar change was refused
+
+
+def test_no_second_model_while_a_tool_is_running():
+    import time as _t
+    from beggy.assistant import guard_tool, hedged
+    started = []
+    tool = guard_tool(lambda: _t.sleep(0.4) or "done")
+
+    def call(model):
+        started.append(model)
+        return tool() if model == "a" else "b answer"
+    assert hedged(["a", "b"], call, "t", hedge_after_s=0.1) == ("a", "done")
+    assert started == ["a"]
+
+
+def test_calendar_tools_refuse_to_guess_a_time():
+    from beggy.assistant import make_tools
+    done = []
+    robot = _types.SimpleNamespace(calendar=lambda op, a: done.append(op) or {"created": {}}, progress=lambda k: None)
+    tools = {f.__name__: f for f in make_tools(robot)}
+    assert "error" in tools["create_calendar_event"](title="x", start_iso="2026-11-27T00:00:00+07:00",
+                                                       end_iso="2026-11-27T01:00:00+07:00", time_words="")
+    assert "error" in tools["update_calendar_event"](event_id="e1", start_iso="2026-11-27T00:00:00+07:00")
+    tools["update_calendar_event"](event_id="e1", title="ชื่อใหม่")          # rename only: no time needed
+    tools["create_calendar_event"](title="x", start_iso="2026-11-27T12:00:00+07:00",
+                                   end_iso="2026-11-27T14:00:00+07:00", time_words="เที่ยงถึงบ่ายสอง")
+    assert done == ["update", "create"]
+
+
+def test_thai_time_words():
+    from beggy.assistant import thai_time
+    cases = {(0, 0): "เที่ยงคืน", (1, 0): "ตีหนึ่ง", (6, 0): "หกโมงเช้า", (10, 0): "สิบโมง", (11, 0): "สิบเอ็ดโมง",
+             (12, 0): "เที่ยง", (12, 30): "เที่ยงครึ่ง", (13, 0): "บ่ายโมง", (14, 0): "บ่ายสองโมง",
+             (16, 0): "สี่โมงเย็น", (18, 0): "หกโมงเย็น", (19, 0): "หนึ่งทุ่ม", (20, 15): "สองทุ่มสิบห้านาที",
+             (23, 0): "ห้าทุ่ม", (9, 45): "เก้าโมงเช้าสี่สิบห้านาที", (13, 21): "บ่ายโมงยี่สิบเอ็ดนาที"}
+    for (h, m), words in cases.items():
+        assert thai_time(h, m) == words
+
+
+def test_failed_calendar_change_is_never_spoken_as_done():
+    a = _scripted_assistant([("", [("create_calendar_event", {"title": "x"})]), ("สร้างนัดให้แล้วค่ะ", [])])
+    a.tools[0] = lambda **kw: {"error": "Invalid isoformat string"}
+    a.tools[0].__name__ = "create_calendar_event"
+    r = a.ask("สร้างนัด")
+    assert "ไม่สำเร็จ" in r["reply"] and len(a.chats) == 1
+
+
+def test_clean_iso_strips_junk():
+    from beggy.assistant import clean_iso
+    assert clean_iso(" 2026-11-27T12:00:00+07:00, ") == "2026-11-27T12:00:00+07:00"
+
+
+def test_gtts_is_asked_again_when_slow(monkeypatch):
+    import time
+    import beggy.tts as tts
+    calls = []
+
+    def fake(text, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(3)
+        return b"mp3"
+    monkeypatch.setattr(tts, "_gtts", fake)
+    sp = tts.Speaker.__new__(tts.Speaker)
+    sp.gtts_timeout, sp.edge_timeout, sp.edge_skip_until = 6, 3, float("inf")
+    t0 = time.time()
+    assert sp.synth("สวัสดี", "v")[0] == b"mp3" and time.time() - t0 < 2.5 and len(calls) == 2
+

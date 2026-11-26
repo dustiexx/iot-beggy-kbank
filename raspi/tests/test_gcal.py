@@ -94,7 +94,7 @@ def test_robot_calendar_reports_reason_and_resets_after_expiry(monkeypatch):
     from beggy_main import Robot
 
     class Expired:
-        def list_events(self, days):
+        def list_events(self, days, **kw):
             raise gcal.NotConnected("login expired", "login_expired")
 
     r = Robot.__new__(Robot)
@@ -141,3 +141,11 @@ def test_calendar_context_is_cached_and_cleared_on_changes():
     r.calendar("update", {"event_id": "a", "title": "ย้ายแล้ว"})
     r.calendar_context()
     assert [c[0] for c in svc.ev.calls] == ["list", "patch", "list"]  # refreshed after the change
+
+
+
+def test_list_can_reach_back_for_past_events():
+    svc = FakeService()
+    now = dt.datetime(2026, 11, 27, 2, 20, tzinfo=TZ)
+    Calendar(svc).list_events(days_ahead=7, now=now, days_back=1)
+    assert svc.ev.calls[0][1]["timeMin"] == "2026-11-26T00:00:00+07:00"

@@ -18,6 +18,7 @@ import io
 import logging
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 from pathlib import Path
@@ -81,6 +82,8 @@ class Speaker:
         self.audio_out = audio_out
         self.gain_db = gain_db                 # AUDIO_GAIN_DB: louder playback through a soft limiter
         self.edge_skip_until = 0.0             # monotonic time; edge-tts is skipped until then after a failure
+        self._cache: dict = {}                 # (text, voice) -> synthesized fixed phrases
+        self._play_lock = threading.Lock()     # one sound at a time on the speaker
         self.out_dir = out_dir
         self.edge_timeout = edge_timeout
         self.gtts_timeout = gtts_timeout
@@ -90,7 +93,7 @@ class Speaker:
 
         edge-tts (best voice) and gTTS run at the same time: edge-tts is used if it answers within
         edge_timeout, otherwise the gTTS audio is already there - no waiting for one to fail first."""
-        pool = concurrent.futures.ThreadPoolExecutor(2)
+        pool = concurrent.futures.ThreadPoolExecutor(3)
         try:
             gtts_job = pool.submit(_gtts, text, self.gtts_timeout)
             if time.monotonic() >= self.edge_skip_until:
@@ -105,16 +108,45 @@ class Speaker:
                     log.warning("edge-tts failed (%s), using gTTS for the next %d min",
                                 str(e)[:100] or type(e).__name__, self.EDGE_PAUSE_S // 60)
             try:
-                return gtts_job.result(timeout=self.gtts_timeout + 1), "mp3", "gtts"
+                return self._first_gtts(pool, gtts_job, text), "mp3", "gtts"
             except Exception as e:
                 log.warning("gTTS failed: %s", str(e)[:100] or type(e).__name__)
             return _espeak(text), "wav", "espeak-ng"
         finally:
             pool.shutdown(wait=False)   # don't wait for the slower engine
 
-    def say(self, text: str, voice: str) -> dict:
+    GTTS_HEDGE_S = 1.5   # gTTS usually answers in ~0.3 s but sometimes stalls ~5 s: then ask again
+
+    def _first_gtts(self, pool, job, text):
+        done, _ = concurrent.futures.wait([job], timeout=self.GTTS_HEDGE_S)
+        if done and job.exception() is None:
+            return job.result()
+        jobs = [job, pool.submit(_gtts, text, self.gtts_timeout)]
+        last = None
+        for f in concurrent.futures.as_completed(jobs, timeout=self.gtts_timeout + 1):
+            if f.exception() is None and f.result():
+                return f.result()
+            last = f.exception()
+        raise last or RuntimeError("gTTS gave no audio")
+
+    def prepare(self, text: str, voice: str) -> None:
+        """Synthesize a fixed phrase into the cache ahead of time (no playback)."""
+        if (text, voice) not in self._cache:
+            audio, fmt, engine = self.synth(text, voice)
+            if engine != "espeak-ng":
+                self._cache[(text, voice)] = (audio, fmt, engine)
+
+    def say(self, text: str, voice: str, cache: bool = False) -> dict:
+        """Synthesize and play. cache=True for fixed phrases ("please wait..."): synthesized once, then instant.
+        Playback is serialized: a reply waits until a "please wait" that is still playing has finished."""
         t0 = time.time()
-        audio, fmt, engine = self.synth(text, voice)
+        key = (text, voice)
+        if cache and key in self._cache:
+            audio, fmt, engine = self._cache[key]
+        else:
+            audio, fmt, engine = self.synth(text, voice)
+            if cache and engine != "espeak-ng":
+                self._cache[key] = (audio, fmt, engine)
         info = {"engine": engine, "synth_s": round(time.time() - t0, 2)}
         if self.audio_out == "none":
             self.out_dir.mkdir(exist_ok=True)
@@ -122,7 +154,8 @@ class Speaker:
             path.write_bytes(audio)
             info["saved"] = str(path)
             return info
-        with tempfile.NamedTemporaryFile(suffix="." + fmt) as f, tempfile.NamedTemporaryFile(suffix=".wav") as w:
+        with self._play_lock, tempfile.NamedTemporaryFile(suffix="." + fmt) as f, \
+                tempfile.NamedTemporaryFile(suffix=".wav") as w:
             f.write(audio)
             f.flush()
             if self.gain_db:

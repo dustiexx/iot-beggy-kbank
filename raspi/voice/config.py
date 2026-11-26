@@ -38,7 +38,7 @@ class VoiceConfig:
 
     # --- recording after the wake word ---
     start_timeout_s: float = 5.0     # give up if nobody starts talking within this time
-    end_silence_s: float = 1.0       # this much silence after speech ends the recording
+    end_silence_s: float = 1.2       # this much silence after speech ends the recording
     max_record_s: float = 12.0
     speech_factor: float = 3.0       # speech = RMS above noise floor * this
     min_speech_rms: float = 300.0    # ...and at least this (int16 units)

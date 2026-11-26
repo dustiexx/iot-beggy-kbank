@@ -1,4 +1,4 @@
-# Beggy: TODO (อัปเดต 23 พ.ย. 2026)
+# Beggy: TODO (อัปเดต 27 พ.ย. 2026)
 
 **Deadline:** สไลด์ + วิดีโอ ส่ง myCourseVille **2 ธ.ค. 2026, 9:00 น.**
 โค้ด Pi อยู่ที่ branch [`raspi`](https://github.com/dustiexx/iot-beggy-kbank/tree/raspi) วิธีใช้ทั้งหมดอยู่ใน `raspi/README.md`
@@ -9,14 +9,15 @@
 
 - **Posture detection** (MediaPipe บน Pi): good / slouch / head_down / too_close / uneven_shoulders, กรองการจับผิดตอนไม่มีคน
 - **Server กลาง** `beggy_main.py`: รวม posture, voice, servo, battery, MQTT, HTTP API ไว้ใน process เดียว
-- **Voice:** wake word → STT (Gemini 3.1 Flash Lite) → Gemini + tools → TTS (edge-tts → gTTS → espeak-ng offline)
-- **Gemini tools:** หันกล้องหาคน, อ่านค่า sensor, ท่านั่ง, แบต, Google Calendar (ดู/สร้าง/ลบ), ประวัติย้อนหลัง (ผ่าน backend)
+- **Voice:** "hey Beggy" (wake word ที่เทรนเอง) → Gemini 3.1 Flash Lite ฟังเสียงคำถามโดยตรง + tools (STT ทำคู่กันเพื่อเก็บข้อความ, ถ้าเน็ต/Gemini ล่มใช้ Whisper offline) → TTS (edge-tts กับ gTTS แข่งกัน, espeak-ng offline)
+  - ถ้าเบกกี้ถามกลับ จะฟังคำตอบต่อ 6 วิโดยไม่ต้องเรียกชื่อใหม่ / เข้าใจเวลาแบบไทย (บ่ายโมง = 13:00)
+- **Gemini tools:** หันกล้องหาคน, อ่านค่า sensor, ท่านั่ง, แบต, Google Calendar (ดู/สร้าง/แก้/ลบ), ประวัติย้อนหลัง (ผ่าน backend)
 - **Servo pan/tilt:** หันกล้องให้คนอยู่กลางเฟรม (ทดสอบด้วยหัวจำลองแล้ว)
 - **แบต UPS HAT (E) ผ่าน I2C:** เตือนแบบ iPhone ที่ 20% และ 10%
 - **systemd:** เปิดเองตอนบูต, restart เองถ้าล่ม
 - **Evaluation script:** วัด fps + accuracy + confusion matrix + ภาพกรณีถูก/ผิด
 - **Google Calendar:** ตั้ง OAuth + login แล้ว (23 พ.ย.) ทดสอบอ่าน/สร้าง/ลบนัดบนปฏิทินจริงผ่าน
-- **Tests:** 41 ข้อผ่าน
+- **Tests:** 70 ข้อผ่าน
 
 ## 📡 MQTT topics (สัญญากลางของทั้งทีม)
 
@@ -29,7 +30,7 @@
 | `beggy/pi/battery` | Pi | AWS | แบตทุก 30 วิ + `battery_low` → DB + dashboard |
 | `beggy/pi/voice` | Pi | AWS | สิ่งที่ผู้ใช้พูด + คำตอบของเบกกี้ → DB + dashboard |
 | `beggy/pi/head` | Pi | AWS | ผลการหันกล้องหาคน → dashboard |
-| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | ทุก 5 นาที: `calendar_upcoming` (นัดใน 24 ชม. ข้างหน้า) หรือ `calendar_error` (เช่น login หมดอายุ) + `calendar_created` / `calendar_deleted` ทันทีเมื่อเบกกี้สร้าง/ลบนัด → แจ้งเตือน calendar deadline (ดูรายละเอียดด้านล่าง) |
+| `beggy/pi/calendar` | Pi | AWS (backend / dashboard) | ทุก 5 นาที: `calendar_upcoming` (นัดใน 24 ชม. ข้างหน้า) หรือ `calendar_error` (เช่น login หมดอายุ) + `calendar_created` / `calendar_updated` / `calendar_deleted` ทันทีเมื่อเบกกี้สร้าง/แก้/ลบนัด → แจ้งเตือน calendar deadline (ดูรายละเอียดด้านล่าง) |
 | `beggy/pi/status` | Pi | AWS (dashboard) | online / offline (retained + last will) |
 | `beggy/pi/settings` | AWS (backend / dashboard) | Pi | เปลี่ยน setting จากหน้า Setting ของ dashboard |
 | `beggy/pi/settings_result` | Pi | AWS (backend / dashboard) | ยืนยันว่า setting ไหนถูกใช้ / ถูกปฏิเสธ |
@@ -38,12 +39,13 @@
 
 ### รายละเอียด `beggy/pi/calendar`
 
-Pi ส่งข้อความ 4 แบบ:
+Pi ส่งข้อความ 5 แบบ:
 
 | `type` | ส่งเมื่อ | ข้อมูล |
 |---|---|---|
 | `calendar_upcoming` | ทุก 5 นาที | `events`: รายการนัดทั้งหมดใน 24 ชม. ข้างหน้า (ส่งทั้งรายการทุกครั้ง, ไม่มีนัด = `[]`) |
 | `calendar_created` | ทันทีที่เบกกี้สร้างนัดจากคำสั่งเสียง | `id`, `title`, `start`, `end`, `all_day`, `location` |
+| `calendar_updated` 🆕 | ทันทีที่เบกกี้เลื่อนเวลา/เปลี่ยนชื่อนัด (`id` เดิม) | ข้อมูลใหม่ของนัด: `id`, `title`, `start`, `end`, `all_day`, `location` → ถ้าแจ้งเตือนนัดนี้ไปแล้ว ให้ใช้เวลาใหม่ |
 | `calendar_deleted` | ทันทีที่เบกกี้ลบนัดจากคำสั่งเสียง (หลังผู้ใช้ยืนยัน) | ข้อมูลของนัดที่ถูกลบ: `id`, `title`, `start`, `end`, `all_day`, `location` |
 | `calendar_error` | ทุก 5 นาทีแทน `calendar_upcoming` ถ้าอ่านปฏิทินไม่ได้ | `reason`: `not_connected` (ยังไม่ login), `login_expired` (ครบ 7 วัน ต้อง login ใหม่), `api_error` (เน็ต/Google มีปัญหา) + `error` ข้อความ |
 
@@ -66,8 +68,8 @@ Pi ส่งข้อความ 4 แบบ:
 | `posture_status_every_s` | `5` | ส่ง posture status ขึ้น AWS ทุกกี่วินาที |
 | `head_auto_home_s` | `30` | หลังหันหาคน กลับท่าปกติ (ตำแหน่งตรวจท่านั่ง) ภายในกี่วินาที |
 | `voice_enabled` | `true` | เปิด/ปิดระบบเสียง |
-| `wakeword` | `"hey_jarvis"` | คำปลุก (`"models/hey_beggy.joblib"` เมื่อเทรนเสร็จ) ⚠️ มีผลหลังรีสตาร์ท service |
-| `wake_threshold` | `0.5` | ความไวของคำปลุก (0–1, ต่ำ = ไวขึ้นแต่ปลุกผิดบ่อยขึ้น) |
+| `wakeword` | `"models/hey_beggy.joblib"` | คำปลุก "hey Beggy" (สำรอง: `"hey_jarvis"` คู่กับ threshold 0.4) ⚠️ มีผลหลังรีสตาร์ท service |
+| `wake_threshold` | `0.98` | ความไวของคำปลุก (0–1, ต่ำ = ไวขึ้นแต่ปลุกผิดบ่อยขึ้น) |
 | `tts_voice` | `"th-TH-PremwadeeNeural"` | เสียงพูด: หญิง / `"th-TH-NiwatNeural"` ชาย |
 | `battery_every_s` | `30` | อ่านแบตทุกกี่วินาที |
 | `battery_low_pct` | `20` | เตือนแบตต่ำครั้งแรกที่กี่ % |
@@ -87,18 +89,17 @@ Pi ส่งข้อความ 4 แบบ:
 
 ## 🟡 รอของ / ต้องมีคนทำ
 
-- [ ] **กล้อง Pi Camera Module 3:** รอปริ้นต์ตัวยึด แล้ว calibrate ใหม่ + ทดสอบ (ตอนนี้ใช้ USB webcam อยู่)
+- [ ] **กล้อง Pi Camera Module 3:** ใช้งานแล้ว (~7.6 fps, 26 พ.ย.) เหลือยึดให้ตรง (ตอนนี้เอียง ~30–40°) แล้ว calibrate ท่านั่งใหม่ (`calibration.json` ยังเป็นของ webcam ตัวเก่า)
 - [x] **ลำโพง (MAX98357A):** ต่อสายแล้ว เสียงออก ตั้ง `AUDIO_OUT` แล้ว (26 พ.ย.)
 - [x] **Servo:** ต่อสายแล้ว ใช้ hardware PWM (ไม่สั่น) (26 พ.ย.)
 - [ ] **Servo pan เป็นแบบหมุน 360°** (สั่งเป็นความเร็ว ไม่ใช่มุม) โค้ดใช้วิธีหมุนตามเวลาแทน มุมเป็นค่าประมาณ ไม่แม่นเท่าแบบ 180° ถ้าหาซื้อ SG90 แบบ 180° ได้ เปลี่ยนแล้วตั้ง `pan_continuous = False` ใน `raspi/head/config.py` ได้เลย
 - [ ] **ประกอบหัวเสร็จแล้ว:** หา limit / home / ทิศ (invert) ของ pan + tilt ด้วย `head_main.py`, หันหน้าตรงแล้วรัน `head_main.py pan-zero`
 - [ ] **Capacitor 470–1000 µF ที่ราง 5V ของ servo** (ตอนนี้ไฟ servo มาจาก 5V header ของ Pi, ยังไม่ใส่) เช็ก `vcgencmd get_throttled` ต้องได้ `0x0`
 - [x] **ทดสอบเสียงครบวงจร** STT → Gemini → ลำโพง ใช้ได้แล้ว (26 พ.ย.) ถอดเสียงถูก ~2 วิ, ตอบ ~6–8 วิ ถ้า Gemini ไม่ว่าง (503) จะสลับไปรุ่น lite ตัวอื่นเอง
-- [ ] **ลองพูดกับเบกกี้ด้วยไมค์จริงอีกรอบ** (ตอนนี้ใช้ "hey jarvis" ที่ threshold 0.4)
-- [ ] **Wake word "hey Beggy":** อัดเสียงไปแล้ว 1 คน 37 ครั้ง + เสียงคุยปกติ 10.8 นาที แต่ยังจับผิดบ่อย (~30–140 ครั้ง/ชม.) ต้องได้เสียงคนอื่นเพิ่ม:
-  - ทุกคนในทีมพูด "hey Beggy" คนละ 20–40 ครั้ง: `wakeword_train.py record-pos`
-  - อัดเสียงคุยปกติเพิ่มอีก 20–30 นาที (ดีที่สุดคือหลายคนคุยกัน): `wakeword_train.py record-neg --seconds 600`
-  - (ตอนนี้ยังใช้ "hey jarvis" แทน)
+- [x] **คุยกับเบกกี้ด้วยไมค์จริง** ใช้ได้แล้ว (26–27 พ.ย.): ถามเวลา, สร้าง/แก้/ลบนัด ตอบได้ ช้าสุดตอน Gemini ไม่ว่าง (503/504)
+- [x] **Wake word "hey Beggy":** ใช้งานแล้ว (model v5 อยู่ใน git, threshold 0.98) ทดสอบสด: ปลุกติด 31/31 ครั้ง, ปลุกผิดเองประมาณ 1 ครั้ง/10 นาทีตอนมีคนคุย/เปิดทีวี
+- [ ] **ให้ทุกคนในทีมอัดเสียง "hey Beggy"** คนละ 20–40 ครั้ง (ตอนนี้เทรนจากเสียงคนเดียว อาจไม่ติดกับเสียงคนอื่น/กรรมการ): หยุด service ก่อน `sudo systemctl stop beggy` แล้ว `wakeword_train.py record-pos` เสร็จแล้ว `sudo systemctl start beggy` จากนั้นฝั่ง Pi เทรนใหม่
+- [ ] **ไมค์ USB ค้างเองประมาณทุก 15 นาที** (ไม่มี error จาก kernel) โค้ดเปิดใหม่ให้อัตโนมัติใน 2 วิแล้ว ถ้ามีไมค์ตัวอื่นลองเปลี่ยนดู
 
 ## 🔁 ต้องทำซ้ำเป็นระยะ
 
@@ -116,13 +117,14 @@ Pi ส่งข้อความ 4 แบบ:
 - [ ] Strengths / Limitations เช่น:
   - Gemini ฟรีจำกัด 500 ครั้ง/วัน
   - TTS ฟรีไม่เสถียร (มี offline fallback)
-  - ต้องใช้เน็ต
+  - ต้องใช้เน็ต (ถอดเสียงสำรองด้วย Whisper offline ได้ แต่การตอบยังต้องใช้ Gemini)
+  - wake word เทรนจากเสียงคนเดียว
   - posture ใช้ได้เฉพาะตำแหน่งหัวที่ calibrate
 - [ ] เทียบกับสินค้าจริงในตลาด
 - [ ] วิดีโอประมาณ 5 นาที: hardware + app + system
 
 ## ⚠️ หมายเหตุ
 
-- **Gemini free tier:** ใช้แต่ **3.1 Flash Lite** (500 ครั้ง/วัน) เพราะ 3.6/3.8 Flash ได้แค่ 20 ครั้ง/วันและช้า ทดสอบอย่าเปลือง: คำถามเสียง 1 ครั้งใช้ประมาณ 3 requests
+- **Gemini free tier:** ใช้แต่ **3.1 Flash Lite** (500 ครั้ง/วัน) เพราะ 3.6/3.8 Flash ได้แค่ 20 ครั้ง/วันและช้า ทดสอบอย่าเปลือง: คำถามเสียง 1 ครั้งใช้ 2 requests (+1 ต่อการเรียก tool แต่ละครั้ง)
 - **DynamoDB:** เกณฑ์เขียนว่า "time-series database" ต้องอธิบายในสไลด์ว่าออกแบบ key เป็น time-series (partition ตาม device/metric, sort ตามเวลา)
 - **หลังจบโปรเจกต์:** สร้าง Gemini API key ใหม่ (key ปัจจุบันเคยถูกส่งในแชท)

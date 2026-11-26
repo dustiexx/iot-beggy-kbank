@@ -79,10 +79,16 @@ class Calendar:
             self._service = build("calendar", "v3", credentials=_credentials(), cache_discovery=False)
         return self._service
 
-    def list_events(self, days_ahead: float = 1, now: dt.datetime | None = None, limit: int = 20) -> list[dict]:
+    def list_events(self, days_ahead: float = 1, now: dt.datetime | None = None, limit: int = 20,
+                    days_back: int = 0) -> list[dict]:
+        """Events from now (or from 00:00 `days_back` days ago, so past ones can still be edited) until
+        `days_ahead` days from now."""
         now = now or dt.datetime.now(TZ)
+        since = now
+        if days_back:
+            since = (now - dt.timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
         res = self.service.events().list(
-            calendarId=self.calendar_id, timeMin=now.isoformat(),
+            calendarId=self.calendar_id, timeMin=since.isoformat(),
             timeMax=(now + dt.timedelta(days=days_ahead)).isoformat(),
             singleEvents=True, orderBy="startTime", maxResults=limit,
         ).execute()

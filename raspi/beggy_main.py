@@ -112,7 +112,9 @@ class Robot:
             self._cal = Calendar()
         try:
             if op == "list":
-                return {"events": self._cal.list_events(float(args.get("days_ahead", 1)))}
+                return {"events": self._cal.list_events(float(args.get("days_ahead", 1)),
+                                                        limit=int(args.get("limit", 20)),
+                                                        days_back=int(args.get("days_back", 0)))}
             self._cal_cache = None    # any change: Gemini's view of the calendar must be refreshed
             if op == "create":
                 ev = self._cal.create_event(args["title"], args["start"], args["end"])
@@ -138,10 +140,14 @@ class Robot:
             log.warning("calendar %s failed: %s", op, e)
             return {"error": str(e)[:200], "reason": "api_error"}
 
+    def progress(self, kind: str) -> None:
+        if self.voice:
+            self.voice.progress(kind)
+
     CAL_CACHE_S = 120
 
     def calendar_context(self) -> list | None:
-        """The next 7 days of events (with ids) for Gemini's instructions, so it can answer / edit / delete
+        """Events from 00:00 yesterday to 7 days ahead (with ids) for Gemini's instructions, so it can answer / edit / delete
         without a list_calendar_events round trip first. Cached; cleared whenever Beggy changes an event."""
         cache = getattr(self, "_cal_cache", None)
         if cache and time.time() - cache[0] >= self.CAL_CACHE_S:   # old: answer now, refresh in the background
@@ -149,7 +155,7 @@ class Robot:
         return cache[1] if cache else self._refresh_cal_cache()
 
     def _refresh_cal_cache(self):
-        events = self.calendar("list", {"days_ahead": 7}).get("events")
+        events = self.calendar("list", {"days_ahead": 7, "days_back": 1, "limit": 50}).get("events")
         self._cal_cache = (time.time(), events) if events is not None else None
         return events
 
