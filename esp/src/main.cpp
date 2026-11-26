@@ -13,6 +13,7 @@
 
 #include "config.h"
 #include "secrets.h"
+#include "dust.h"
 
 #ifdef USE_LOCAL_BROKER
 #include <ESPmDNS.h>
@@ -29,7 +30,6 @@ extern const char private_key_pem[] asm("_binary_certs_private_pem_key_start");
 PubSubClient mqtt(net);
 DHT dht(PIN_DHT, DHT11);
 
-static float dustVocV = DUST_VOC_V;
 static uint32_t lastPublishMs = 0;
 static uint32_t lastMqttAttemptMs = 0;
 
@@ -53,29 +53,15 @@ static float readLux() {
   return constrain(lux, 0.0f, 100000.0f);
 }
 
-// One GP2Y1014AU0F reading, using the datasheet pulse timing:
-// LED on, sample after 0.28 ms, LED off after 0.32 ms, 10 ms period.
-static float readDustVoltsOnce() {
-  digitalWrite(PIN_DUST_LED, LOW);
-  delayMicroseconds(280);
-  uint32_t mv = analogReadMilliVolts(PIN_DUST_VO);
-  delayMicroseconds(40);
-  digitalWrite(PIN_DUST_LED, HIGH);
-  delayMicroseconds(9680);
-  return mv / 1000.0f * DUST_DIVIDER_RATIO;
-}
-
 static float readDustPm25() {
-  float sum = 0;
-  for (int i = 0; i < DUST_SAMPLES; i++) sum += readDustVoltsOnce();
-  float v = sum / DUST_SAMPLES;
-
-  // Clean air gives the lowest voltage; track it so the zero point stays right.
-  if (v < dustVocV) dustVocV = v;
-
-  float ug = (v - dustVocV) / DUST_V_PER_100UG * 100.0f;
-  Serial.printf("[dust] Vo=%.3f V  Voc=%.3f V\n", v, dustVocV);
-  return ug < 0 ? 0 : ug;
+  DustReading d = dustRead();
+  if (!d.ok) {
+    Serial.printf("[dust] unstable (Vo=%.3f V, %d/%d ok, spread %.3f V): dust_pm25 left out\n",
+                  d.vo, d.n, DUST_SAMPLES, d.n ? d.vMax - d.vMin : 0.0f);
+    return NAN;
+  }
+  Serial.printf("[dust] Vo=%.3f V  Voc=%.3f V\n", d.vo, d.vocV);
+  return d.pm25;
 }
 
 // ---------------------------------------------------------------- network
@@ -154,7 +140,7 @@ static void publishReading() {
   if (!isnan(h)) doc["humidity_pct"] = round1(h);
   doc["light_lux"] = (int)roundf(lux);
 #if ENABLE_DUST
-  doc["dust_pm25"] = round1(pm);
+  if (!isnan(pm)) doc["dust_pm25"] = round1(pm);
 #endif
   doc["device"] = DEVICE_ID;
   if (timeIsSet()) doc["unix_ms"] = unixMs();  // left out until NTP has synced
@@ -173,11 +159,9 @@ void setup() {
   delay(200);
   Serial.printf("\n[boot] %s\n", DEVICE_ID);
 
-  pinMode(PIN_DUST_LED, OUTPUT);
-  digitalWrite(PIN_DUST_LED, HIGH);  // LED off
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_LDR, ADC_11db);      // 0-3.3 V range
-  analogSetPinAttenuation(PIN_DUST_VO, ADC_11db);
+  dustBegin();
   dht.begin();
 
   connectWiFi();

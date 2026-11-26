@@ -15,8 +15,8 @@
 // Wi-Fi is on. Avoid the strapping pins GPIO0, 3, 45, 46.
 #define PIN_DHT        4     // KY-015 "S"
 #define PIN_LDR        5     // KY-018 "S"            (ADC1_CH4)
-#define PIN_DUST_VO    6     // GP2Y1014AU0F pin 5 (Vo), through the voltage divider (ADC1_CH5)
-#define PIN_DUST_LED   7     // GP2Y1014AU0F pin 3 (LED), LOW = LED on
+#define PIN_DUST_LED   6     // GP2Y1014AU0F pin 3 (LED), LOW = LED on
+#define PIN_DUST_VO    7     // GP2Y1014AU0F pin 5 (Vo), through the voltage divider (ADC1_CH6)
 
 // ---------- KY-018 (LDR) ----------
 // The module is a divider: LDR + fixed 10k resistor. Power it from 3.3 V.
@@ -32,14 +32,21 @@
 #define LDR_GAMMA         0.7f
 
 // ---------- GP2Y1014AU0F (dust) ----------
-// 0 = sensor not wired yet: dust_pm25 is left out of the message instead of sending noise.
-// Set to 1 once the sensor and its voltage divider are connected.
-#define ENABLE_DUST        0
+// 1 = read the sensor and send dust_pm25. Set to 0 to leave dust_pm25 out of the message
+// (e.g. while the sensor is unplugged) instead of sending noise.
+#define ENABLE_DUST        1
 // The sensor runs on 5 V and its output can exceed 3.3 V, so Vo goes through a divider
 // into the ESP32: Vo -- 10k -- PIN_DUST_VO -- 20k -- GND  ->  ratio = 30k / 20k = 1.5
 #define DUST_DIVIDER_RATIO 1.5f
-// Output with clean air (Voc) and sensitivity, from the datasheet (typical values).
-// Voc auto-adjusts downward if a cleaner reading than this is ever seen.
-#define DUST_VOC_V         0.60f
+// Output with clean air (Voc). Datasheet typical is 0.6 V, but each unit differs.
+// Calibrated 2026-11-26: room Vo was ~1.833 V while a reference meter showed ~8 ug/m3,
+// so Voc = 1.833 - 8/100 * 0.5 = 1.79 V. Voc auto-adjusts downward if a cleaner
+// reading than this is ever seen.
+#define DUST_VOC_V         1.79f
+// Samples below this are dropped: a connected, powered sensor never reads ~0 V.
+#define DUST_MIN_VALID_V   0.10f
+// A batch whose samples spread wider than this is unstable (warming up right after
+// boot, or a loose wire) and is dropped. A settled sensor spreads ~0.05 V.
+#define DUST_MAX_SPREAD_V  0.20f
 #define DUST_V_PER_100UG   0.50f             // 0.5 V per 0.1 mg/m3
 #define DUST_SAMPLES       20                // readings averaged per publish
