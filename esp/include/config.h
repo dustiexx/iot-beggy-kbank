@@ -4,7 +4,7 @@
 // ---------- MQTT ----------
 #define DEVICE_ID          "esp32-1"         // also the MQTT client id; must match the AWS IoT policy
 #define TOPIC_ENV          "beggy/esp/env"
-#define PUBLISH_INTERVAL_MS 15000            // handoff asks for 10-30 s
+#define PUBLISH_INTERVAL_MS 5000             // 5 s: dashboard must look realtime (rubric item 13)
 
 #define AWS_PORT   8883
 #define LOCAL_BROKER_HOST "pi6633101021"     // mDNS name, no ".local"
