@@ -5,6 +5,17 @@
 #define DEVICE_ID          "esp32-1"         // also the MQTT client id; must match the AWS IoT policy
 #define TOPIC_ENV          "beggy/esp/env"
 #define PUBLISH_INTERVAL_MS 5000             // 5 s: dashboard must look realtime (rubric item 13)
+// Report-on-change: sensors are read every CHECK_INTERVAL_MS and a reading is sent right away
+// (instead of waiting for the 5 s tick) when it moved more than these thresholds since the last
+// publish, so the dashboard reacts within ~1 s (lights off, dust puff) without sending more
+// messages while the room is steady. Thresholds sit above each sensor's normal jitter.
+#define CHECK_INTERVAL_MS   1000             // DHT11 can't be read faster than once per second
+#define MIN_GAP_MS          1000             // never publish more often than this
+#define CHANGE_TEMP_C       1.0f
+#define CHANGE_HUMI_PCT     5.0f
+#define CHANGE_LUX_FRAC     0.30f            // 30 % of the last sent value...
+#define CHANGE_LUX_MIN      5.0f             // ...and at least 5 lux (dark rooms jitter by a few)
+#define CHANGE_PM25         30.0f            // the dust sensor jitters ~20 ug/m3 between reads
 
 #define AWS_PORT   8883
 #define LOCAL_BROKER_HOST "pi6633101021"     // mDNS name, no ".local"

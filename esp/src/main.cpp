@@ -1,7 +1,8 @@
 // ESP32 sensor board for the beggy system.
 // Reads KY-015 (DHT11), KY-018 (LDR) and GP2Y1014AU0F (PM2.5), then publishes
 //   {"temperature_c":..,"humidity_pct":..,"light_lux":..,"dust_pm25":..,"device":"esp32-1","unix_ms":..}
-// to beggy/esp/env with retain = true, on AWS IoT Core (or the Pi test broker in the "local" env).
+// to beggy/esp/env with retain = true, on AWS IoT Core (or the Pi test broker in the "local" env):
+// every PUBLISH_INTERVAL_MS, and right away when a reading jumps (see CHANGE_* in config.h).
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -31,6 +32,7 @@ PubSubClient mqtt(net);
 DHT dht(PIN_DHT, DHT11);
 
 static uint32_t lastPublishMs = 0;
+static uint32_t lastCheckMs = 0;
 static uint32_t lastMqttAttemptMs = 0;
 
 // ---------------------------------------------------------------- sensors
@@ -127,29 +129,63 @@ static void connectMqtt() {
 
 // ---------------------------------------------------------------- publish
 
-static void publishReading() {
-  float t = dht.readTemperature();
-  float h = dht.readHumidity();
-  float lux = readLux();
-#if ENABLE_DUST
-  float pm = readDustPm25();
-#endif
+struct Reading {
+  float t, h, lux, pm;   // NAN = not available this time
+};
 
-  JsonDocument doc;
-  if (!isnan(t)) doc["temperature_c"] = round1(t);
-  if (!isnan(h)) doc["humidity_pct"] = round1(h);
-  doc["light_lux"] = (int)roundf(lux);
+static Reading readSensors() {
+  Reading r;
+  r.t = dht.readTemperature();
+  r.h = dht.readHumidity();
+  r.lux = readLux();
 #if ENABLE_DUST
-  if (!isnan(pm)) doc["dust_pm25"] = round1(pm);
+  r.pm = readDustPm25();
+#else
+  r.pm = NAN;
 #endif
+  return r;
+}
+
+static Reading lastSent = {NAN, NAN, NAN, NAN};
+
+static bool movedBy(float now, float before, float threshold) {
+  if (isnan(now)) return false;
+  if (isnan(before)) return true;          // first good value after a failed read
+  return fabsf(now - before) >= threshold;
+}
+
+// Which sensor changed enough to send now, or nullptr.
+static const char* bigChange(const Reading& r) {
+  if (movedBy(r.t, lastSent.t, CHANGE_TEMP_C)) return "temperature";
+  if (movedBy(r.h, lastSent.h, CHANGE_HUMI_PCT)) return "humidity";
+  float luxStep = isnan(lastSent.lux) ? 0.0f : fmaxf(lastSent.lux * CHANGE_LUX_FRAC, CHANGE_LUX_MIN);
+  if (movedBy(r.lux, lastSent.lux, luxStep)) return "light";
+  if (movedBy(r.pm, lastSent.pm, CHANGE_PM25)) return "dust";
+  return nullptr;
+}
+
+static void publishReading(const Reading& r, const char* why) {
+  JsonDocument doc;
+  if (!isnan(r.t)) doc["temperature_c"] = round1(r.t);
+  if (!isnan(r.h)) doc["humidity_pct"] = round1(r.h);
+  doc["light_lux"] = (int)roundf(r.lux);
+  if (!isnan(r.pm)) doc["dust_pm25"] = round1(r.pm);
   doc["device"] = DEVICE_ID;
   if (timeIsSet()) doc["unix_ms"] = unixMs();  // left out until NTP has synced
-  if (isnan(t) || isnan(h)) Serial.println("[dht] read failed, fields left out");
+  if (isnan(r.t) || isnan(r.h)) Serial.println("[dht] read failed, fields left out");
 
   char payload[256];
   size_t len = serializeJson(doc, payload, sizeof(payload));
   bool ok = mqtt.publish(TOPIC_ENV, (const uint8_t*)payload, len, /*retained=*/true);
-  Serial.printf("[pub] %s %s %s\n", ok ? "sent" : "FAILED", TOPIC_ENV, payload);
+  Serial.printf("[pub] %s (%s) %s %s\n", ok ? "sent" : "FAILED", why, TOPIC_ENV, payload);
+  if (ok) {
+    // keep the last good value of a sensor that failed this time, so one failed read
+    // doesn't make the next good one count as a change
+    if (!isnan(r.t)) lastSent.t = r.t;
+    if (!isnan(r.h)) lastSent.h = r.h;
+    if (!isnan(r.lux)) lastSent.lux = r.lux;
+    if (!isnan(r.pm)) lastSent.pm = r.pm;
+  }
 }
 
 // ---------------------------------------------------------------- main
@@ -174,9 +210,17 @@ void loop() {
   connectMqtt();
   mqtt.loop();
 
-  if (mqtt.connected() && (lastPublishMs == 0 || millis() - lastPublishMs >= PUBLISH_INTERVAL_MS)) {
-    lastPublishMs = millis();
-    publishReading();
+  // Read every second; send on the 5 s tick, or at once when a value jumps (report-on-change).
+  uint32_t now = millis();
+  if (mqtt.connected() && (lastCheckMs == 0 || now - lastCheckMs >= CHECK_INTERVAL_MS)) {
+    lastCheckMs = now;
+    Reading r = readSensors();
+    bool due = lastPublishMs == 0 || now - lastPublishMs >= PUBLISH_INTERVAL_MS;
+    const char* changed = due ? nullptr : bigChange(r);
+    if (due || (changed && now - lastPublishMs >= MIN_GAP_MS)) {
+      lastPublishMs = now;
+      publishReading(r, due ? "interval" : changed);
+    }
   }
   delay(10);
 }
