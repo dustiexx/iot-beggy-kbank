@@ -6,6 +6,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
@@ -68,20 +69,29 @@ static float readDustPm25() {
 
 // ---------------------------------------------------------------- network
 
+// Every network listed in secrets.h (WIFI_SSID, and WIFI_SSID_2/_3 if defined) is tried;
+// WiFiMulti scans and joins the strongest one in range, so the board works at home and on a
+// phone hotspot without reflashing. Hidden SSIDs don't show up in the scan.
+static WiFiMulti wifiMulti;
+
+static void addNetworks() {
+  wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
+#ifdef WIFI_SSID_2
+  wifiMulti.addAP(WIFI_SSID_2, WIFI_PASSWORD_2);
+#endif
+#ifdef WIFI_SSID_3
+  wifiMulti.addAP(WIFI_SSID_3, WIFI_PASSWORD_3);
+#endif
+}
+
 static void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
-  Serial.printf("[wifi] connecting to %s", WIFI_SSID);
+  Serial.println("[wifi] looking for a known network...");
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(500);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[wifi] ok, ip %s\n", WiFi.localIP().toString().c_str());
+  if (wifiMulti.run(15000) == WL_CONNECTED) {
+    Serial.printf("[wifi] ok, %s, ip %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("\n[wifi] failed, will retry");
+    Serial.println("[wifi] no known network connected, will retry");
   }
 }
 
@@ -200,6 +210,7 @@ void setup() {
   dustBegin();
   dht.begin();
 
+  addNetworks();
   connectWiFi();
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC, for unix_ms
   setupBroker();

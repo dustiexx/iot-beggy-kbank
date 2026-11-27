@@ -32,7 +32,7 @@
 
 ## ตั้งค่า
 
-1. แก้ [include/secrets.h](include/secrets.h): ใส่ `WIFI_SSID`, `WIFI_PASSWORD` และ `AWS_IOT_ENDPOINT` (ขอจากคนทำ backend
+1. แก้ [include/secrets.h](include/secrets.h): ใส่ `WIFI_SSID`, `WIFI_PASSWORD` (ใส่ Wi-Fi สำรองได้อีก 2 ชุดที่ `WIFI_SSID_2`/`_3` เช่น hotspot มือถือ บอร์ดจะต่อตัวที่เจอเอง) และ `AWS_IOT_ENDPOINT` (ขอจากคนทำ backend
    ดูได้ที่ AWS console > IoT Core > Settings > Device data endpoint)
 2. ไฟล์ certificate อยู่ใน `certs/` แล้ว และถูก compile ฝังเข้า firmware อัตโนมัติ
    ถ้าได้ cert ชุดใหม่มา ให้เขียนทับ `certs/device.pem.crt` กับ `certs/private.pem.key`
