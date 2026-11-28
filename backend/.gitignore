@@ -5,7 +5,7 @@ node_modules/
 .env.*
 !.env.example
 
-# cert
+# cert & keys 
 *.crt
 *.key
 *.pem
