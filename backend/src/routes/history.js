@@ -15,6 +15,16 @@ const router = express.Router();
 
 router.use(requireApiKey);
 
+// Time constants
+const SECOND_MS = 1000;
+const MINUTE_MS = 60 * SECOND_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+const THAILAND_OFFSET_MS = 7 * HOUR_MS;
+const EXPECTED_POSTURE_INTERVAL_MS = 5000;
+
+// Validate requested history range
 function getRange(query) {
   const fromMs = parseTime(query.from);
   const toMs = parseTime(query.to);
@@ -23,13 +33,26 @@ function getRange(query) {
     throw new Error("'from' must be before 'to'");
   }
 
-  if (toMs - fromMs > 31 * 24 * 60 * 60 * 1000) {
+  if (toMs - fromMs > 31 * DAY_MS) {
     throw new Error("Maximum history range is 31 days");
   }
 
   return { fromMs, toMs };
 }
 
+// Calculate bucket start using Thailand time (UTC+7)
+function getBucketStart(ts, bucket) {
+  const bucketSize = bucket === "day"
+    ? DAY_MS
+    : HOUR_MS;
+  return (
+    Math.floor((ts + THAILAND_OFFSET_MS) / bucketSize)
+    * bucketSize
+    - THAILAND_OFFSET_MS
+  );
+}
+
+// POSTURE HISTORY
 router.get("/posture", async (req, res, next) => {
   try {
     const { fromMs, toMs } = getRange(req.query);
@@ -41,7 +64,10 @@ router.get("/posture", async (req, res, next) => {
     );
 
     const statuses = items
-      .filter(item => item.type === "posture_status")
+      .filter(item =>
+        item.type === "posture_status" &&
+        typeof item.ts === "number"
+      )
       .sort((a, b) => a.ts - b.ts);
 
     const summary = {
@@ -55,22 +81,25 @@ router.get("/posture", async (req, res, next) => {
       issues_s: {}
     };
 
-    const expectedIntervalMs = 5000;
-
     for (let i = 0; i < statuses.length; i++) {
       const current = statuses[i];
       const next = statuses[i + 1];
 
-      const intervalMs = next
-        ? Math.max(0, next.ts - current.ts)
-        : expectedIntervalMs;
+      // Determine the end of this status interval
+      const intervalEnd = next
+        ? Math.min(next.ts, current.ts + EXPECTED_POSTURE_INTERVAL_MS)
+        : current.ts + EXPECTED_POSTURE_INTERVAL_MS;
 
-      const duration = Math.min(
-        intervalMs,
-        expectedIntervalMs
+      // Clip interval to requested time range
+      const intervalStart = Math.max(current.ts, fromMs);
+      const clippedEnd = Math.min(intervalEnd, toMs);
+
+      const duration = Math.max(
+        0,
+        clippedEnd - intervalStart
       );
 
-      const seconds = Math.floor(duration / 1000);
+      const seconds = Math.floor(duration / SECOND_MS);
 
       if (current.state === "good") {
         summary.good_s += seconds;
@@ -80,22 +109,26 @@ router.get("/posture", async (req, res, next) => {
         summary.away_s += seconds;
       }
 
-      if (current.issues && typeof current.issues === "object") {
-        for (const [issue, active] of Object.entries(current.issues)) {
-          if (active) {
-            summary.issues_s[issue] =
-              (summary.issues_s[issue] || 0) + seconds;
-          }
+      // Pi sends issues as an array:
+      // ["slouch", "head_down"]
+      if (Array.isArray(current.issues)) {
+        for (const issue of current.issues) {
+          if (typeof issue !== "string") continue;
+
+          summary.issues_s[issue] =
+            (summary.issues_s[issue] || 0) + seconds;
         }
       }
     }
 
     res.json(summary);
+
   } catch (error) {
     next(error);
   }
 });
 
+// ENVIRONMENT HISTORY
 router.get("/env", async (req, res, next) => {
   try {
     const { fromMs, toMs } = getRange(req.query);
@@ -104,9 +137,9 @@ router.get("/env", async (req, res, next) => {
     const bucket = req.query.bucket || "hour";
 
     const allowedMetrics = [
-      "temperature",
-      "humidity",
-      "light",
+      "temperature_c",
+      "humidity_pct",
+      "light_lux",
       "dust_pm25"
     ];
 
@@ -129,17 +162,14 @@ router.get("/env", async (req, res, next) => {
     );
 
     const values = items.filter(item =>
-      typeof item[metric] === "number"
+      typeof item[metric] === "number" &&
+      typeof item.ts === "number"
     );
 
     const buckets = new Map();
 
-    const bucketSize = bucket === "hour"
-      ? 60 * 60 * 1000
-      : 24 * 60 * 60 * 1000;
-
     for (const item of values) {
-      const start = Math.floor(item.ts / bucketSize) * bucketSize;
+      const start = getBucketStart(item.ts, bucket);
 
       if (!buckets.has(start)) {
         buckets.set(start, []);
@@ -164,6 +194,7 @@ router.get("/env", async (req, res, next) => {
       metric,
       points
     });
+
   } catch (error) {
     next(error);
   }
